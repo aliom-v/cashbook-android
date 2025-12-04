@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">本地记账</string>
+    <string name="accessibility_desc">监听微信、支付宝、云闪付、工商银行、建设银行、招商银行等App的支付页面，自动记录收支</string>
+</resources>
