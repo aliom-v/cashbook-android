@@ -5,6 +5,10 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// 导入需要的类
+import java.util.Properties
+import java.io.FileInputStream
+
 android {
     namespace = "com.example.localexpense"
     compileSdk = 35
@@ -17,21 +21,77 @@ android {
         versionName = "1.0"
     }
 
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+    // 仅保留中文资源，减小 APK 体积
+    androidResources {
+        localeFilters += listOf("zh-rCN", "zh")
+    }
+
+    // 签名配置
+    signingConfigs {
+        // 正式发布签名（如果keystore.properties文件存在）
+        create("release") {
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            if (keystorePropertiesFile.exists()) {
+                val keystoreProperties = Properties()
+                keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            } else {
+                // 如果没有配置文件，使用Android SDK默认的debug签名
+                println("警告: keystore.properties 不存在，使用Android SDK默认debug签名")
+                val debugKeystorePath = System.getProperty("user.home") + "/.android/debug.keystore"
+                storeFile = file(debugKeystorePath)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
     }
+
+    buildTypes {
+        debug {
+            isMinifyEnabled = false
+            // Debug 模式下可以添加额外的检查
+        }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // 使用签名配置
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
     kotlinOptions {
         jvmTarget = "17"
+        // 启用更多编译器优化
+        freeCompilerArgs += listOf(
+            "-opt-in=kotlin.RequiresOptIn",
+            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
+            "-opt-in=kotlinx.coroutines.FlowPreview"
+        )
     }
+
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    // 打包优化
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/NOTICE.md"
+            excludes += "/META-INF/LICENSE.md"
+        }
     }
 }
 

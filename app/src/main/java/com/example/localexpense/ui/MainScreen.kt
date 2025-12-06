@@ -20,14 +20,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.localexpense.data.ExpenseEntity
+import com.example.localexpense.ui.components.AccessibilityGuideBanner
+import com.example.localexpense.ui.components.AccessibilityGuideDialog
 import com.example.localexpense.ui.components.AddExpenseDialog
 import com.example.localexpense.ui.components.BudgetProgressBar
+import com.example.localexpense.ui.components.openAccessibilitySettings
 import com.example.localexpense.ui.screens.*
 import com.example.localexpense.ui.theme.ExpenseTheme
 import com.example.localexpense.ui.util.IconUtil
+import com.example.localexpense.util.CategoryNames
 import com.example.localexpense.util.DateUtils
 import com.example.localexpense.util.DateUtils.StatsPeriod
-import java.text.SimpleDateFormat
 import java.util.*
 
 enum class Screen { HOME, STATS, CALENDAR, SETTINGS }
@@ -53,6 +56,27 @@ fun MainScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var editExpense by remember { mutableStateOf<ExpenseEntity?>(null) }
     var showSearchBar by remember { mutableStateOf(false) }
+    
+    // 检测无障碍服务状态
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var accessibilityRefreshKey by remember { mutableStateOf(0) }
+    val isAccessibilityEnabled = remember(accessibilityRefreshKey) {
+        com.example.localexpense.util.AccessibilityUtils.isServiceEnabled(context)
+    }
+    
+    // 监听生命周期，当页面重新可见时刷新无障碍状态
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                accessibilityRefreshKey++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // Snackbar 状态用于错误提示
     val snackbarHostState = remember { SnackbarHostState() }
@@ -161,7 +185,9 @@ fun MainScreen(
                             editExpense = expense
                             showAddDialog = true
                         },
-                        onDeleteExpense = onDeleteExpense
+                        onDeleteExpense = onDeleteExpense,
+                        isAccessibilityEnabled = isAccessibilityEnabled,
+                        onOpenAccessibility = onOpenAccessibility
                     )
                 }
                 Screen.STATS -> {
@@ -232,7 +258,9 @@ private fun HomeContent(
     showSearchBar: Boolean,
     onSearch: (String) -> Unit,
     onExpenseClick: (ExpenseEntity) -> Unit,
-    onDeleteExpense: (ExpenseEntity) -> Unit
+    onDeleteExpense: (ExpenseEntity) -> Unit,
+    isAccessibilityEnabled: Boolean,
+    onOpenAccessibility: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         // Search bar
@@ -282,6 +310,11 @@ private fun HomeContent(
                 onDeleteExpense = onDeleteExpense
             )
         } else {
+            // 无障碍服务未开启提示
+            if (!isAccessibilityEnabled) {
+                AccessibilityTipCard(onOpenAccessibility = onOpenAccessibility)
+            }
+            
             // Summary card
             SummaryCard(
                 expense = state.monthlyExpense,
@@ -302,6 +335,30 @@ private fun HomeContent(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun AccessibilityTipCard(onOpenAccessibility: () -> Unit) {
+    var showGuideDialog by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    // 使用新的引导横幅
+    AccessibilityGuideBanner(
+        isEnabled = false,  // 这个组件只在未启用时显示
+        onDismiss = { /* 用户关闭横幅 */ },
+        onOpenSettings = { showGuideDialog = true }
+    )
+
+    // 详细引导对话框
+    if (showGuideDialog) {
+        AccessibilityGuideDialog(
+            onDismiss = { showGuideDialog = false },
+            onOpenSettings = {
+                showGuideDialog = false
+                openAccessibilitySettings(context)
+            }
+        )
     }
 }
 
@@ -401,7 +458,7 @@ private fun SearchResults(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            item {
+            item(key = "search_header", contentType = "header") {
                 Text(
                     text = "找到 ${results.size} 条记录",
                     fontSize = 13.sp,
@@ -409,7 +466,11 @@ private fun SearchResults(
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
             }
-            items(results, key = { it.id }) { expense ->
+            items(
+                items = results,
+                key = { it.id },
+                contentType = { "expense" }
+            ) { expense ->
                 ExpenseItem(
                     expense = expense,
                     onClick = { onExpenseClick(expense) },
@@ -469,10 +530,9 @@ private fun ExpenseList(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         groupedExpenses.forEach { (date, dayExpenses) ->
-            item {
-                // 使用 DateUtils 格式化显示日期
+            // 日期头部项，使用 date 作为 key，contentType 区分不同类型的项
+            item(key = "header_$date", contentType = "header") {
                 val displayDate = DateUtils.formatDisplayDate(date)
-
                 val dayTotal = dayExpenses.filter { it.type == "expense" }.sumOf { it.amount }
 
                 Row(
@@ -495,7 +555,11 @@ private fun ExpenseList(
                 }
             }
 
-            items(dayExpenses, key = { it.id }) { expense ->
+            items(
+                items = dayExpenses,
+                key = { it.id },
+                contentType = { "expense" }
+            ) { expense ->
                 ExpenseItem(
                     expense = expense,
                     onClick = { onExpenseClick(expense) },
@@ -515,7 +579,6 @@ private fun ExpenseItem(
 ) {
     val colors = ExpenseTheme.colors
     val isExpense = expense.type == "expense"
-    val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
     var showMenu by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
@@ -568,26 +631,10 @@ private fun ExpenseItem(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                val category = expense.category
-                val iconName = when (category) {
-                    "餐饮" -> "Restaurant"
-                    "购物" -> "ShoppingBag"
-                    "交通" -> "DirectionsCar"
-                    "娱乐" -> "SportsEsports"
-                    "生活" -> "Home"
-                    "医疗" -> "LocalHospital"
-                    "教育" -> "School"
-                    "工资" -> "AccountBalance"
-                    "奖金" -> "CardGiftcard"
-                    "红包" -> "CardGiftcard"
-                    "转账" -> "SwapHoriz"
-                    "投资" -> "TrendingUp"
-                    "兼职" -> "Work"
-                    else -> "MoreHoriz"
-                }
+                val iconName = getCategoryIcon(expense.category)
                 Icon(
                     imageVector = IconUtil.getIcon(iconName),
-                    contentDescription = category,
+                    contentDescription = expense.category,
                     tint = if (isExpense) colors.expense else colors.income,
                     modifier = Modifier.size(22.dp)
                 )
@@ -629,7 +676,7 @@ private fun ExpenseItem(
                     color = if (isExpense) colors.expense else colors.income
                 )
                 Text(
-                    text = timeFormat.format(Date(expense.timestamp)),
+                    text = DateUtils.formatTime(expense.timestamp),
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -672,4 +719,24 @@ private fun ExpenseItem(
             }
         }
     }
+}
+
+/**
+ * 根据分类名称获取对应图标名称
+ */
+private fun getCategoryIcon(category: String): String = when (category) {
+    CategoryNames.FOOD -> "Restaurant"
+    CategoryNames.SHOPPING -> "ShoppingBag"
+    CategoryNames.TRANSPORT -> "DirectionsCar"
+    CategoryNames.ENTERTAINMENT -> "SportsEsports"
+    CategoryNames.LIVING -> "Home"
+    CategoryNames.MEDICAL -> "LocalHospital"
+    CategoryNames.EDUCATION -> "School"
+    CategoryNames.SALARY -> "AccountBalance"
+    CategoryNames.BONUS -> "CardGiftcard"
+    CategoryNames.RED_PACKET -> "CardGiftcard"
+    CategoryNames.TRANSFER -> "SwapHoriz"
+    CategoryNames.INVESTMENT -> "TrendingUp"
+    CategoryNames.PART_TIME -> "Work"
+    else -> "MoreHoriz"
 }

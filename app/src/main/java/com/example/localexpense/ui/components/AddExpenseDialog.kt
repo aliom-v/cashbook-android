@@ -51,12 +51,13 @@ fun AddExpenseDialog(
     val expenseColor = ExpenseTheme.colors.expense
     val incomeColor = ExpenseTheme.colors.income
 
-    val filteredCategories = categories.filter { 
-        it.type == if (isExpense) "expense" else "income" 
+    val filteredCategories = remember(categories, isExpense) {
+        categories.filter { it.type == if (isExpense) "expense" else "income" }
     }
 
     // 当类型切换或分类列表变化时，更新选中的分类
-    LaunchedEffect(isExpense, filteredCategories) {
+    // 使用 filteredCategories 作为依赖，确保分类列表已过滤后再更新选中状态
+    LaunchedEffect(filteredCategories, isExpense) {
         if (filteredCategories.isNotEmpty()) {
             // 编辑模式下尝试匹配原分类
             val matchedCategory = editExpense?.let { exp ->
@@ -64,7 +65,10 @@ fun AddExpenseDialog(
                     filteredCategories.find { it.name == exp.category }
                 } else null
             }
-            selectedCategory = matchedCategory ?: filteredCategories.first()
+            // 只有当当前选中的分类不在过滤后的列表中时才更新
+            if (selectedCategory == null || selectedCategory !in filteredCategories) {
+                selectedCategory = matchedCategory ?: filteredCategories.first()
+            }
         }
     }
 
@@ -198,7 +202,7 @@ fun AddExpenseDialog(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Date selector
-                val dateFormat = SimpleDateFormat("yyyy年MM月dd日", Locale.getDefault())
+                val dateFormat = remember { SimpleDateFormat("yyyy年MM月dd日", Locale.getDefault()) }
                 OutlinedCard(
                     onClick = { showDatePicker = true },
                     modifier = Modifier.fillMaxWidth(),
@@ -217,26 +221,32 @@ fun AddExpenseDialog(
                 Spacer(modifier = Modifier.height(24.dp))
 
                 // Save button
+                val isAmountValid = amount.toDoubleOrNull()?.let { it > 0 } == true
+                
                 Button(
                     onClick = {
-                        val amountValue = amount.toDoubleOrNull() ?: return@Button
-                        if (amountValue <= 0) return@Button
+                        val amountValue = amount.toDoubleOrNull()
+                        if (amountValue == null || amountValue <= 0) {
+                            // 金额无效，不保存
+                            return@Button
+                        }
                         
                         onSave(
                             ExpenseEntity(
-                                id = editExpense?.id ?: 0,
+                                id = editExpense?.id ?: 0L,
                                 amount = amountValue,
                                 merchant = merchant.ifBlank { selectedCategory?.name ?: "未知" },
                                 type = if (isExpense) "expense" else "income",
                                 timestamp = selectedDate,
                                 channel = "Manual",
                                 category = selectedCategory?.name ?: "其他",
-                                categoryId = selectedCategory?.id ?: 0,
+                                categoryId = selectedCategory?.id ?: 0L,
                                 note = note
                             )
                         )
                         onDismiss()
                     },
+                    enabled = isAmountValid,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(50.dp),
@@ -252,20 +262,43 @@ fun AddExpenseDialog(
     }
 
     if (showDatePicker) {
-        // 将本地时间转换为UTC用于DatePicker显示
-        val calendar = Calendar.getInstance().apply { timeInMillis = selectedDate }
-        val utcMillis = selectedDate + calendar.timeZone.getOffset(selectedDate)
-        
-        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = utcMillis)
+        // 提取当前选中日期的年月日
+        val currentCal = remember(selectedDate) {
+            Calendar.getInstance().apply { timeInMillis = selectedDate }
+        }
+        // DatePicker 使用 UTC 时间，需要转换
+        val initialUtcMillis = remember(selectedDate) {
+            Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                set(Calendar.YEAR, currentCal.get(Calendar.YEAR))
+                set(Calendar.MONTH, currentCal.get(Calendar.MONTH))
+                set(Calendar.DAY_OF_MONTH, currentCal.get(Calendar.DAY_OF_MONTH))
+                set(Calendar.HOUR_OF_DAY, 12) // 使用中午12点避免边界问题
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+        }
+
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = initialUtcMillis)
         DatePickerDialog(
             onDismissRequest = { showDatePicker = false },
             confirmButton = {
                 TextButton(onClick = {
-                    datePickerState.selectedDateMillis?.let { utcTime ->
-                        // 将UTC时间转换回本地时间
-                        val cal = Calendar.getInstance()
-                        val offset = cal.timeZone.getOffset(utcTime)
-                        selectedDate = utcTime - offset
+                    datePickerState.selectedDateMillis?.let { utcMillis ->
+                        // 从 UTC 时间提取年月日，设置为本地时间的那一天
+                        val utcCal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                            timeInMillis = utcMillis
+                        }
+                        val localCal = Calendar.getInstance().apply {
+                            set(Calendar.YEAR, utcCal.get(Calendar.YEAR))
+                            set(Calendar.MONTH, utcCal.get(Calendar.MONTH))
+                            set(Calendar.DAY_OF_MONTH, utcCal.get(Calendar.DAY_OF_MONTH))
+                            // 保留原来的时分秒
+                            set(Calendar.HOUR_OF_DAY, currentCal.get(Calendar.HOUR_OF_DAY))
+                            set(Calendar.MINUTE, currentCal.get(Calendar.MINUTE))
+                            set(Calendar.SECOND, currentCal.get(Calendar.SECOND))
+                        }
+                        selectedDate = localCal.timeInMillis
                     }
                     showDatePicker = false
                 }) { Text("确定") }

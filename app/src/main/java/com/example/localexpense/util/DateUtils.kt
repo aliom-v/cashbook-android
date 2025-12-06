@@ -9,7 +9,7 @@ import java.util.*
  */
 object DateUtils {
 
-    // 使用 ThreadLocal 确保线程安全
+    // 使用 ThreadLocal 确保线程安全，提供安全的 getter
     private val dateFormat = ThreadLocal.withInitial {
         SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
     }
@@ -25,6 +25,22 @@ object DateUtils {
     private val exportDateFormat = ThreadLocal.withInitial {
         SimpleDateFormat("yyyyMMdd", Locale.getDefault())
     }
+
+    // 安全获取 ThreadLocal 值，如果为 null 则创建新实例
+    private fun getDateFormatter(): SimpleDateFormat =
+        dateFormat.get() ?: SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+
+    private fun getTimeFormatter(): SimpleDateFormat =
+        timeFormat.get() ?: SimpleDateFormat("HH:mm", Locale.getDefault())
+
+    private fun getDateTimeFormatter(): SimpleDateFormat =
+        dateTimeFormat.get() ?: SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+
+    private fun getDisplayDateFormatter(): SimpleDateFormat =
+        displayDateFormat.get() ?: SimpleDateFormat("MM月dd日 EEEE", Locale.CHINESE)
+
+    private fun getExportDateFormatter(): SimpleDateFormat =
+        exportDateFormat.get() ?: SimpleDateFormat("yyyyMMdd", Locale.getDefault())
 
     /**
      * 统计周期
@@ -98,21 +114,21 @@ object DateUtils {
      * 格式化时间戳为日期字符串 (yyyy-MM-dd)
      */
     fun formatDate(timestamp: Long): String {
-        return dateFormat.get()!!.format(Date(timestamp))
+        return getDateFormatter().format(Date(timestamp))
     }
 
     /**
      * 格式化时间戳为时间字符串 (HH:mm)
      */
     fun formatTime(timestamp: Long): String {
-        return timeFormat.get()!!.format(Date(timestamp))
+        return getTimeFormatter().format(Date(timestamp))
     }
 
     /**
      * 格式化时间戳为完整日期时间字符串
      */
     fun formatDateTime(timestamp: Long): String {
-        return dateTimeFormat.get()!!.format(Date(timestamp))
+        return getDateTimeFormatter().format(Date(timestamp))
     }
 
     /**
@@ -120,8 +136,8 @@ object DateUtils {
      */
     fun formatDisplayDate(dateString: String): String {
         return try {
-            val date = dateFormat.get()!!.parse(dateString)
-            displayDateFormat.get()!!.format(date!!)
+            val date = getDateFormatter().parse(dateString) ?: return dateString
+            getDisplayDateFormatter().format(date)
         } catch (e: Exception) {
             dateString
         }
@@ -131,13 +147,13 @@ object DateUtils {
      * 获取导出文件名用的日期
      */
     fun getExportDateString(): String {
-        return exportDateFormat.get()!!.format(Date())
+        return getExportDateFormatter().format(Date())
     }
 
     /**
      * 获取今天的日期字符串
      */
     fun getTodayString(): String {
-        return dateFormat.get()!!.format(Date())
+        return getDateFormatter().format(Date())
     }
 }

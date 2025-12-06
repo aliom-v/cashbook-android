@@ -22,4 +22,11 @@ interface BudgetDao {
 
     @Query("SELECT * FROM budget WHERE month = :month AND categoryId = :categoryId LIMIT 1")
     fun getCategoryBudget(month: Int, categoryId: Long): Flow<BudgetEntity?>
+
+    // 用于数据备份的一次性查询
+    @Query("SELECT * FROM budget ORDER BY month DESC")
+    suspend fun getAllOnce(): List<BudgetEntity>
+
+    @Query("DELETE FROM budget")
+    suspend fun deleteAll()
 }

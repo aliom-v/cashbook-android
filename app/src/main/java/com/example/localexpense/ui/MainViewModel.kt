@@ -1,17 +1,29 @@
 package com.example.localexpense.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.localexpense.BuildConfig
 import com.example.localexpense.data.*
 import com.example.localexpense.util.Constants
 import com.example.localexpense.util.DateUtils
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 import java.util.*
+
+private const val TAG = "MainViewModel"
+
+/** 仅在 Debug 模式下输出日志 */
+private inline fun logD(message: () -> String) {
+    if (BuildConfig.DEBUG) {
+        Log.d(TAG, message())
+    }
+}
 
 /**
  * UI状态
@@ -54,31 +66,28 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
 
     init {
         loadData()
-        initCategories()
+        // 移除 initCategories()，已在 Repository 中自动初始化
         setupSearch()
         setupStats()
     }
 
-    private fun initCategories() {
-        viewModelScope.launch {
-            try {
-                repo.initDefaultCategories()
-            } catch (e: Exception) {
-                updateError("初始化分类失败: ${e.message}")
-            }
-        }
-    }
-
     /**
      * 使用 combine 合并多个 Flow，确保状态一致性
+     * 使用 stateIn 缓存 Flow 结果，避免重复订阅
      */
     private fun loadData() {
         viewModelScope.launch {
             try {
+                // 缓存主要数据流，避免重复查询
+                val expensesFlow = repo.getAllFlow()
+                    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+                val categoriesFlow = repo.getAllCategories()
+                    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
                 // 合并主要数据流
                 combine(
-                    repo.getAllFlow(),
-                    repo.getAllCategories(),
+                    expensesFlow,
+                    categoriesFlow,
                     loadMonthlyStatsFlow(),
                     loadBudgetFlow()
                 ) { expenses, categories, monthlyStats, budget ->
@@ -178,14 +187,18 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
 
     // Expense operations
     fun addExpense(expense: ExpenseEntity) {
+        logD { "addExpense: amount=${expense.amount}, type=${expense.type}, category=${expense.category}" }
         viewModelScope.launch {
             try {
                 if (expense.id == 0L) {
-                    repo.insertExpense(expense)
+                    val id = repo.insertExpense(expense)
+                    logD { "Expense inserted with id: $id" }
                 } else {
                     repo.updateExpense(expense)
+                    logD { "Expense updated: id=${expense.id}" }
                 }
             } catch (e: Exception) {
+                if (BuildConfig.DEBUG) Log.e(TAG, "保存失败", e)
                 updateError("保存失败: ${e.message}")
             }
         }

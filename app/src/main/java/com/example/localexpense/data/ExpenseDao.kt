@@ -21,7 +21,11 @@ interface ExpenseDao {
     @Query("SELECT * FROM expense WHERE timestamp BETWEEN :start AND :end ORDER BY timestamp DESC")
     fun getByDateRange(start: Long, end: Long): Flow<List<ExpenseEntity>>
 
-    @Query("SELECT * FROM expense WHERE (merchant LIKE '%' || :query || '%' OR note LIKE '%' || :query || '%' OR category LIKE '%' || :query || '%') ORDER BY timestamp DESC")
+    /**
+     * 搜索交易记录
+     * 注意：query 参数应在调用前进行 SQL LIKE 特殊字符转义
+     */
+    @Query("SELECT * FROM expense WHERE (merchant LIKE '%' || :query || '%' ESCAPE '\\' OR note LIKE '%' || :query || '%' ESCAPE '\\' OR category LIKE '%' || :query || '%' ESCAPE '\\') ORDER BY timestamp DESC")
     fun search(query: String): Flow<List<ExpenseEntity>>
 
     @Query("SELECT SUM(amount) FROM expense WHERE type = 'expense' AND timestamp BETWEEN :start AND :end")
@@ -38,6 +42,13 @@ interface ExpenseDao {
 
     @Query("SELECT * FROM expense WHERE date(timestamp/1000, 'unixepoch', 'localtime') = :date ORDER BY timestamp DESC")
     fun getByDate(date: String): Flow<List<ExpenseEntity>>
+
+    // 用于数据备份的一次性查询
+    @Query("SELECT * FROM expense ORDER BY timestamp DESC")
+    suspend fun getAllOnce(): List<ExpenseEntity>
+
+    @Query("DELETE FROM expense")
+    suspend fun deleteAll()
 }
 
 data class CategoryStat(

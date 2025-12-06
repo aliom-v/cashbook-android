@@ -1,10 +1,11 @@
 package com.example.localexpense.ui.screens
 
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
-import android.view.accessibility.AccessibilityManager
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -31,8 +32,12 @@ import androidx.core.content.FileProvider
 import com.example.localexpense.data.BudgetEntity
 import com.example.localexpense.data.CategoryEntity
 import com.example.localexpense.data.ExpenseEntity
+import com.example.localexpense.data.TransactionRepository
+import com.example.localexpense.data.backup.DataBackupManager
+import com.example.localexpense.domain.Result
 import com.example.localexpense.ui.theme.ExpenseTheme
 import com.example.localexpense.ui.util.IconUtil
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -50,12 +55,34 @@ fun SettingsScreen(
     var showBudgetDialog by remember { mutableStateOf(false) }
     var showCategoryDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
+    var showBackupDialog by remember { mutableStateOf(false) }
+    var showRestoreDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    // 检测无障碍服务状态
-    val isAccessibilityEnabled = remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        isAccessibilityEnabled.value = isAccessibilityServiceEnabled(context)
+    // 备份管理器
+    val backupManager = remember {
+        DataBackupManager(context, TransactionRepository.getInstance(context))
+    }
+
+    // 检测无障碍服务状态 - 使用 key 触发重新检测
+    var refreshKey by remember { mutableStateOf(0) }
+    val isAccessibilityEnabled = remember(refreshKey) {
+        isAccessibilityServiceEnabled(context)
+    }
+    
+    // 监听生命周期，当页面重新可见时刷新状态
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                refreshKey++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     LazyColumn(
@@ -106,6 +133,20 @@ fun SettingsScreen(
                     subtitle = "导出为 CSV 文件",
                     onClick = { showExportDialog = true }
                 )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                SettingsItem(
+                    icon = Icons.Default.Backup,
+                    title = "备份数据",
+                    subtitle = "完整备份到 JSON 文件",
+                    onClick = { showBackupDialog = true }
+                )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                SettingsItem(
+                    icon = Icons.Default.Restore,
+                    title = "恢复数据",
+                    subtitle = "从 JSON 备份文件恢复",
+                    onClick = { showRestoreDialog = true }
+                )
             }
         }
 
@@ -115,13 +156,13 @@ fun SettingsScreen(
                 SettingsItem(
                     icon = Icons.Default.Accessibility,
                     title = "无障碍服务",
-                    subtitle = if (isAccessibilityEnabled.value)
+                    subtitle = if (isAccessibilityEnabled)
                         "已启用 - 正在监听微信/支付宝"
                     else
                         "未启用 - 点击开启自动记账",
                     onClick = onOpenAccessibility,
                     trailing = {
-                        if (isAccessibilityEnabled.value) {
+                        if (isAccessibilityEnabled) {
                             Icon(
                                 Icons.Default.CheckCircle,
                                 contentDescription = "已启用",
@@ -175,6 +216,26 @@ fun SettingsScreen(
             expenses = expenses,
             context = context,
             onDismiss = { showExportDialog = false }
+        )
+    }
+
+    // Backup dialog
+    if (showBackupDialog) {
+        BackupDialog(
+            backupManager = backupManager,
+            context = context,
+            scope = scope,
+            onDismiss = { showBackupDialog = false }
+        )
+    }
+
+    // Restore dialog
+    if (showRestoreDialog) {
+        RestoreDialog(
+            backupManager = backupManager,
+            context = context,
+            scope = scope,
+            onDismiss = { showRestoreDialog = false }
         )
     }
 }
@@ -594,19 +655,180 @@ private fun exportToCsv(context: Context, expenses: List<ExpenseEntity>) {
  * 检测无障碍服务是否已启用
  */
 private fun isAccessibilityServiceEnabled(context: Context): Boolean {
-    val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
-        ?: return false
+    return com.example.localexpense.util.AccessibilityUtils.isServiceEnabled(context)
+}
 
-    val enabledServices = am.getEnabledAccessibilityServiceList(
-        AccessibilityServiceInfo.FEEDBACK_ALL_MASK
-    )
+/**
+ * 备份对话框
+ */
+@Composable
+private fun BackupDialog(
+    backupManager: DataBackupManager,
+    context: Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onDismiss: () -> Unit
+) {
+    var isLoading by remember { mutableStateOf(false) }
 
-    val targetService = "${context.packageName}/.accessibility.ExpenseAccessibilityService"
-
-    return enabledServices.any { service ->
-        service.resolveInfo.serviceInfo.let {
-            "${it.packageName}/${it.name}" == targetService ||
-            it.name == "com.example.localexpense.accessibility.ExpenseAccessibilityService"
+    // 创建文件选择器
+    val createFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            isLoading = true
+            scope.launch {
+                when (val result = backupManager.exportToUri(uri)) {
+                    is Result.Success -> {
+                        Toast.makeText(context, "备份成功", Toast.LENGTH_SHORT).show()
+                        onDismiss()
+                    }
+                    is Result.Error -> {
+                        Toast.makeText(context, "备份失败: ${result.message}", Toast.LENGTH_SHORT).show()
+                    }
+                    is Result.Loading -> {}
+                }
+                isLoading = false
+            }
         }
     }
+
+    AlertDialog(
+        onDismissRequest = { if (!isLoading) onDismiss() },
+        title = { Text("备份数据") },
+        text = {
+            Column {
+                Text("将所有账单、分类和预算数据备份到 JSON 文件。")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "备份文件可用于数据迁移或恢复。",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (isLoading) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("正在备份...")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    createFileLauncher.launch(backupManager.generateBackupFileName())
+                },
+                enabled = !isLoading
+            ) {
+                Icon(Icons.Default.Backup, null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("选择保存位置")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isLoading) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+/**
+ * 恢复对话框
+ */
+@Composable
+private fun RestoreDialog(
+    backupManager: DataBackupManager,
+    context: Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onDismiss: () -> Unit
+) {
+    var isLoading by remember { mutableStateOf(false) }
+    var mergeMode by remember { mutableStateOf(false) }
+
+    // 文件选择器
+    val openFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            isLoading = true
+            scope.launch {
+                when (val result = backupManager.importFromUri(uri, merge = mergeMode)) {
+                    is Result.Success -> {
+                        Toast.makeText(context, result.data.summary, Toast.LENGTH_LONG).show()
+                        onDismiss()
+                    }
+                    is Result.Error -> {
+                        Toast.makeText(context, "恢复失败: ${result.message}", Toast.LENGTH_SHORT).show()
+                    }
+                    is Result.Loading -> {}
+                }
+                isLoading = false
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!isLoading) onDismiss() },
+        title = { Text("恢复数据") },
+        text = {
+            Column {
+                Text("从 JSON 备份文件恢复数据。")
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { mergeMode = !mergeMode }
+                        .padding(vertical = 8.dp)
+                ) {
+                    Checkbox(
+                        checked = mergeMode,
+                        onCheckedChange = { mergeMode = it }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text("合并模式")
+                        Text(
+                            if (mergeMode) "保留现有数据，追加导入数据"
+                            else "清空现有数据后导入（谨慎操作）",
+                            fontSize = 12.sp,
+                            color = if (mergeMode)
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            else
+                                MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+
+                if (isLoading) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("正在恢复...")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    openFileLauncher.launch(arrayOf("application/json"))
+                },
+                enabled = !isLoading
+            ) {
+                Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("选择备份文件")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isLoading) {
+                Text("取消")
+            }
+        }
+    )
 }

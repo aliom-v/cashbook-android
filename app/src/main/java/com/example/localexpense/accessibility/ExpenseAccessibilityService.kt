@@ -9,17 +9,23 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.app.NotificationCompat
+import com.example.localexpense.BuildConfig
 import com.example.localexpense.R
 import com.example.localexpense.data.TransactionRepository
 import com.example.localexpense.parser.TransactionParser
 import com.example.localexpense.util.Constants
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class ExpenseAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "ExpenseService"
         private const val CHANNEL_ID = "expense_channel"
-        private var notifyId = 1
+        // 通知ID范围：1 到 NOTIFICATION_ID_MOD
+        private const val NOTIFICATION_ID_MIN = 1
+        private const val NOTIFICATION_ID_MAX = Constants.NOTIFICATION_ID_MOD
 
         // 监听的App包名
         private val MONITORED_PACKAGES = setOf(
@@ -29,20 +35,54 @@ class ExpenseAccessibilityService : AccessibilityService() {
         )
     }
 
-    private lateinit var repository: TransactionRepository
-    private lateinit var notificationManager: NotificationManager
+    private var repository: TransactionRepository? = null
+    private var notificationManager: NotificationManager? = null
+    @Volatile
+    private var isInitialized = false
+    
+    // 通知ID，使用实例变量避免静态变量问题
+    private var notifyId = NOTIFICATION_ID_MIN
 
-    // 防重复
+    // 防重复 - 使用同步锁保护
+    private val duplicateLock = Any()
+    @Volatile
     private var lastHash: Int = 0
+    @Volatile
     private var lastTime: Long = 0
+
+    // 文本收集最大深度，防止栈溢出
+    private val maxCollectDepth = 20
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        repository = TransactionRepository.getInstance(applicationContext)
-        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        createNotificationChannel()
-        Log.i(TAG, "无障碍服务已启动")
-        showNotification("服务已启动", "正在监听微信、支付宝交易")
+        try {
+            notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            createNotificationChannel()
+
+            // 使用 try-catch 包裹 Repository 初始化，防止崩溃
+            try {
+                repository = TransactionRepository.getInstance(applicationContext)
+                // 启动后台协程等待初始化完成
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        repository?.waitForInitialization()
+                        isInitialized = true
+                        Log.i(TAG, "无障碍服务已启动并完成初始化")
+                        showNotification("服务已启动", "正在监听微信、支付宝交易")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Repository 初始化等待失败: ${e.message}", e)
+                        isInitialized = false
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Repository 初始化失败: ${e.message}", e)
+                // 即使 Repository 初始化失败，服务仍然运行，但不记录数据
+                isInitialized = false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "服务初始化失败: ${e.message}", e)
+            isInitialized = false
+        }
     }
     
     private fun createNotificationChannel() {
@@ -54,25 +94,41 @@ class ExpenseAccessibilityService : AccessibilityService() {
             ).apply {
                 description = "自动记账成功通知"
             }
-            notificationManager.createNotificationChannel(channel)
+            notificationManager?.createNotificationChannel(channel)
         }
     }
     
     private fun showNotification(title: String, content: String) {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(title)
-            .setContentText(content)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .build()
-        // 使用常量取模防止溢出
-        notifyId = (notifyId % Constants.NOTIFICATION_ID_MOD) + 1
-        notificationManager.notify(notifyId, notification)
+        try {
+            val nm = notificationManager ?: return
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(title)
+                .setContentText(content)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+                .build()
+            // 修复通知ID循环：先使用当前ID，再递增
+            val currentId = notifyId
+            notifyId = if (notifyId >= NOTIFICATION_ID_MAX) NOTIFICATION_ID_MIN else notifyId + 1
+            nm.notify(currentId, notification)
+        } catch (e: Exception) {
+            Log.e(TAG, "发送通知失败: ${e.message}")
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // 全局异常保护，防止服务崩溃
+        try {
+            handleAccessibilityEventSafely(event)
+        } catch (e: Exception) {
+            Log.e(TAG, "onAccessibilityEvent 异常: ${e.message}", e)
+        }
+    }
+
+    private fun handleAccessibilityEventSafely(event: AccessibilityEvent?) {
         if (event == null) return
+        if (!isInitialized || repository == null) return  // 服务未初始化完成，跳过
 
         val pkg = event.packageName?.toString() ?: return
         val eventType = event.eventType
@@ -80,7 +136,11 @@ class ExpenseAccessibilityService : AccessibilityService() {
         // 处理通知事件（优先级最高，快速返回）
         if (eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
             if (pkg in MONITORED_PACKAGES) {
-                handleNotification(event, pkg)
+                try {
+                    handleNotification(event, pkg)
+                } catch (e: Exception) {
+                    Log.e(TAG, "处理通知失败: ${e.message}")
+                }
             }
             return
         }
@@ -92,9 +152,8 @@ class ExpenseAccessibilityService : AccessibilityService() {
             return
         }
 
-        var root: AccessibilityNodeInfo? = null
         try {
-            root = rootInActiveWindow ?: return
+            val root = rootInActiveWindow ?: return
 
             // 快速检查：只在可能包含交易信息的页面才收集所有文本
             if (!quickCheckForTransaction(root)) {
@@ -104,39 +163,36 @@ class ExpenseAccessibilityService : AccessibilityService() {
             val texts = collectAllText(root)
             if (texts.isEmpty()) return
 
-            val joined = texts.joinToString(" | ")
-
-            Log.d(TAG, ">>> 检测到可能的交易页面，收集到 ${texts.size} 条文本")
-
             // 解析交易
             val transaction = TransactionParser.parse(texts, pkg) ?: return
 
-            // 防重复：使用常量定义的时间间隔
-            val hash = transaction.rawText.hashCode()
-            val now = System.currentTimeMillis()
-            if (hash == lastHash && now - lastTime < Constants.DUPLICATE_CHECK_INTERVAL_MS) {
-                Log.d(TAG, "重复交易，跳过")
-                return
+            // 防重复：使用同步块保护，确保原子操作
+            val shouldProcess = synchronized(duplicateLock) {
+                val hash = transaction.rawText.hashCode()
+                val now = System.currentTimeMillis()
+                if (hash == lastHash && now - lastTime < Constants.DUPLICATE_CHECK_INTERVAL_MS) {
+                    false
+                } else {
+                    lastHash = hash
+                    lastTime = now
+                    true
+                }
             }
-            lastHash = hash
-            lastTime = now
 
-            // 保存
-            Log.i(TAG, "✓✓✓ 记录成功: ${transaction.type} ¥${transaction.amount} ${transaction.merchant}")
-            repository.insertTransaction(transaction)
+            if (!shouldProcess) return
+
+            // 保存（日志中隐藏敏感信息）
+            if (BuildConfig.DEBUG) {
+                Log.i(TAG, "✓ 记录: ${transaction.type} ¥*** [商户已隐藏]")
+            }
+            repository?.insertTransaction(transaction)
 
             // 发送通知
             val typeText = if (transaction.type == "income") "收入" else "支出"
             showNotification("记账成功", "$typeText ¥${transaction.amount} - ${transaction.merchant}")
 
         } catch (e: Exception) {
-            Log.e(TAG, "处理事件出错: ${e.message}", e)
-        } finally {
-            try {
-                root?.recycle()
-            } catch (e: Exception) {
-                // 忽略
-            }
+            Log.e(TAG, "处理窗口事件出错: ${e.message}")
         }
     }
 
@@ -149,7 +205,16 @@ class ExpenseAccessibilityService : AccessibilityService() {
         for (keyword in keywords) {
             val nodes = root.findAccessibilityNodeInfosByText(keyword)
             if (nodes.isNotEmpty()) {
-                nodes.forEach { it.recycle() }
+                // API 26-32 需要手动 recycle AccessibilityNodeInfo
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    nodes.forEach { node ->
+                        try {
+                            node.recycle()
+                        } catch (e: Exception) {
+                            // 忽略 recycle 异常
+                        }
+                    }
+                }
                 return true
             }
         }
@@ -158,62 +223,77 @@ class ExpenseAccessibilityService : AccessibilityService() {
     
     private fun handleNotification(event: AccessibilityEvent, pkg: String) {
         if (pkg !in MONITORED_PACKAGES) return
-        
+
         val text = event.text?.joinToString(" ") ?: return
-        Log.d(TAG, "通知: pkg=$pkg, text=$text")
-        
+
         // 解析通知中的交易信息
-        val transaction = TransactionParser.parseNotification(text, pkg)
-        if (transaction != null) {
+        val transaction = TransactionParser.parseNotification(text, pkg) ?: return
+
+        // 防重复：使用同步块保护
+        val shouldProcess = synchronized(duplicateLock) {
             val hash = transaction.rawText.hashCode()
             val now = System.currentTimeMillis()
-            if (hash != lastHash || now - lastTime >= Constants.DUPLICATE_CHECK_INTERVAL_MS) {
+            if (hash == lastHash && now - lastTime < Constants.DUPLICATE_CHECK_INTERVAL_MS) {
+                false
+            } else {
                 lastHash = hash
                 lastTime = now
-                repository.insertTransaction(transaction)
-                val typeText = if (transaction.type == "income") "收入" else "支出"
-                showNotification("记账成功(通知)", "$typeText ¥${transaction.amount}")
+                true
             }
         }
+
+        if (!shouldProcess) return
+
+        repository?.insertTransaction(transaction)
+        val typeText = if (transaction.type == "income") "收入" else "支出"
+        showNotification("记账成功(通知)", "$typeText ¥${transaction.amount}")
     }
 
     override fun onInterrupt() {
         Log.w(TAG, "无障碍服务被中断")
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // 清理资源，防止内存泄漏
+        repository = null
+        notificationManager = null
+        isInitialized = false
+        Log.i(TAG, "无障碍服务已销毁")
+    }
+
     private fun collectAllText(node: AccessibilityNodeInfo): List<String> {
         val result = mutableListOf<String>()
-        collectTextRecursive(node, result)
+        collectTextRecursive(node, result, 0)
         return result
     }
 
-    private fun collectTextRecursive(node: AccessibilityNodeInfo?, list: MutableList<String>) {
-        if (node == null) return
-        
+    private fun collectTextRecursive(node: AccessibilityNodeInfo?, list: MutableList<String>, depth: Int) {
+        // 深度限制，防止栈溢出
+        if (node == null || depth > maxCollectDepth) return
+        // 文本数量限制，避免收集过多
+        if (list.size > 200) return
+
         // 获取文本
-        node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { 
-            list.add(it) 
+        node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() && it.length < 500 }?.let {
+            list.add(it)
         }
-        
+
         // 获取内容描述
-        node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { 
-            list.add(it) 
+        node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() && it.length < 500 }?.let {
+            list.add(it)
         }
-        
-        // 递归子节点，并正确释放资源
-        for (i in 0 until node.childCount) {
-            var child: AccessibilityNodeInfo? = null
+
+        // 递归子节点
+        val childCount = node.childCount.coerceAtMost(50) // 限制子节点数量
+        for (i in 0 until childCount) {
             try {
-                child = node.getChild(i)
-                collectTextRecursive(child, list)
-            } catch (e: Exception) {
-                // 忽略
-            } finally {
-                try {
-                    child?.recycle()
-                } catch (e: Exception) {
-                    // 忽略
+                val child = node.getChild(i)
+                if (child != null) {
+                    collectTextRecursive(child, list, depth + 1)
                 }
+            } catch (e: Exception) {
+                // 忽略获取子节点时的异常
             }
         }
     }

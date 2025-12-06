@@ -1,5 +1,8 @@
 package com.example.localexpense.util
 
+import java.math.BigDecimal
+import java.math.RoundingMode
+
 /**
  * 应用常量定义
  */
@@ -70,4 +73,70 @@ object CategoryNames {
     const val INVESTMENT = "投资"
     const val PART_TIME = "兼职"
     const val OTHER = "其他"
+}
+
+/**
+ * 金额工具类
+ * 使用 BigDecimal 进行精确计算，避免浮点数精度问题
+ */
+object AmountUtils {
+    private const val SCALE = 2 // 保留2位小数
+
+    /**
+     * 安全地将字符串转换为 Double
+     */
+    fun parseAmount(str: String?): Double? {
+        if (str.isNullOrBlank()) return null
+        return try {
+            BigDecimal(str.replace(",", ""))
+                .setScale(SCALE, RoundingMode.HALF_UP)
+                .toDouble()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 格式化金额显示
+     */
+    fun format(amount: Double): String {
+        return BigDecimal(amount)
+            .setScale(SCALE, RoundingMode.HALF_UP)
+            .toString()
+    }
+
+    /**
+     * 安全加法
+     */
+    fun add(a: Double, b: Double): Double {
+        return BigDecimal(a).add(BigDecimal(b))
+            .setScale(SCALE, RoundingMode.HALF_UP)
+            .toDouble()
+    }
+
+    /**
+     * 安全减法
+     */
+    fun subtract(a: Double, b: Double): Double {
+        return BigDecimal(a).subtract(BigDecimal(b))
+            .setScale(SCALE, RoundingMode.HALF_UP)
+            .toDouble()
+    }
+
+    /**
+     * 安全除法（带除零保护）
+     */
+    fun divide(a: Double, b: Double): Double {
+        if (b == 0.0) return 0.0
+        return BigDecimal(a).divide(BigDecimal(b), SCALE, RoundingMode.HALF_UP)
+            .toDouble()
+    }
+
+    /**
+     * 计算百分比
+     */
+    fun percentage(part: Double, total: Double): Double {
+        if (total == 0.0) return 0.0
+        return divide(part * 100, total)
+    }
 }

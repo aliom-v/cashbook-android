@@ -282,9 +282,16 @@ private fun SummaryCard(
     }
 }
 
+// 缓存日期格式化器，避免重复创建
+private object DateFormatterCache {
+    val dayFormat: SimpleDateFormat by lazy { SimpleDateFormat("yyyy年MM月dd日", Locale.getDefault()) }
+    val weekFormat: SimpleDateFormat by lazy { SimpleDateFormat("MM/dd", Locale.getDefault()) }
+    val monthFormat: SimpleDateFormat by lazy { SimpleDateFormat("yyyy年MM月", Locale.getDefault()) }
+}
+
 private fun formatPeriodDate(calendar: Calendar, period: DateUtils.StatsPeriod): String {
     return when (period) {
-        DateUtils.StatsPeriod.DAY -> SimpleDateFormat("yyyy年MM月dd日", Locale.getDefault()).format(calendar.time)
+        DateUtils.StatsPeriod.DAY -> DateFormatterCache.dayFormat.format(calendar.time)
         DateUtils.StatsPeriod.WEEK -> {
             val weekStart = calendar.clone() as Calendar
             weekStart.firstDayOfWeek = Calendar.MONDAY
@@ -293,10 +300,9 @@ private fun formatPeriodDate(calendar: Calendar, period: DateUtils.StatsPeriod):
                 weekStart.add(Calendar.DAY_OF_MONTH, -1)
             }
             val weekEnd = weekStart.clone() as Calendar
-            weekEnd.add(Calendar.DAY_OF_MONTH, 6)  // 修复：使用 DAY_OF_MONTH
-            val format = SimpleDateFormat("MM/dd", Locale.getDefault())
-            "${format.format(weekStart.time)} - ${format.format(weekEnd.time)}"
+            weekEnd.add(Calendar.DAY_OF_MONTH, 6)
+            "${DateFormatterCache.weekFormat.format(weekStart.time)} - ${DateFormatterCache.weekFormat.format(weekEnd.time)}"
         }
-        DateUtils.StatsPeriod.MONTH -> SimpleDateFormat("yyyy年MM月", Locale.getDefault()).format(calendar.time)
+        DateUtils.StatsPeriod.MONTH -> DateFormatterCache.monthFormat.format(calendar.time)
     }
 }

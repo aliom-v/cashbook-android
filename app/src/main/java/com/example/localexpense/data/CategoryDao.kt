@@ -28,4 +28,11 @@ interface CategoryDao {
 
     @Query("SELECT COUNT(*) FROM category")
     suspend fun count(): Int
+
+    // 用于数据备份的一次性查询
+    @Query("SELECT * FROM category ORDER BY type, id")
+    suspend fun getAllOnce(): List<CategoryEntity>
+
+    @Query("DELETE FROM category")
+    suspend fun deleteAll()
 }

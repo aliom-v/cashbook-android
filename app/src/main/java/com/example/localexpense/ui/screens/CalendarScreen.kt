@@ -118,10 +118,13 @@ fun CalendarScreen(
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                val displayDate = try {
-                    val date = dateFormat.parse(selectedDate)
-                    SimpleDateFormat("MM月dd日", Locale.getDefault()).format(date!!)
-                } catch (e: Exception) { selectedDate }
+                val displayDateFormat = remember { SimpleDateFormat("MM月dd日", Locale.getDefault()) }
+                val displayDate = remember(selectedDate) {
+                    try {
+                        val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(selectedDate)
+                        displayDateFormat.format(date!!)
+                    } catch (e: Exception) { selectedDate }
+                }
 
                 Text(
                     text = "$displayDate 账单",
@@ -189,8 +192,8 @@ private fun CalendarGrid(
     expensesByDate: Map<String, List<ExpenseEntity>>,
     onDateSelect: (String) -> Unit
 ) {
-    val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-    val today = dateFormat.format(Date())
+    val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
+    val today = remember { dateFormat.format(Date()) }
 
     val firstDayOfMonth = currentMonth.clone() as Calendar
     firstDayOfMonth.set(Calendar.DAY_OF_MONTH, 1)
@@ -289,7 +292,7 @@ private fun ExpenseListItem(
     onClick: () -> Unit
 ) {
     val isExpense = expense.type == "expense"
-    val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+    val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
     Surface(
         modifier = Modifier

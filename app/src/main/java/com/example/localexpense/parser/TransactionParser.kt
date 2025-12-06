@@ -1,7 +1,9 @@
 package com.example.localexpense.parser
 
 import android.util.Log
+import com.example.localexpense.BuildConfig
 import com.example.localexpense.data.ExpenseEntity
+import com.example.localexpense.util.AmountUtils
 import com.example.localexpense.util.Channel
 import com.example.localexpense.util.Constants
 import java.util.regex.Pattern
@@ -29,14 +31,18 @@ object TransactionParser {
         "红包已存入", "已到账", "入账成功"
     )
 
-    // 支出关键词  
+    // 支出关键词
     private val expenseKeywords = listOf(
         "支付成功", "付款成功", "已付款", "已支付",
         "转账成功", "已转账", "转账给",
-        "发红包", "发出红包", "已发送", "发了一个红包",
-        "扫码付款", "消费",
+        "扫码付款", "消费"
+    )
+
+    // 发红包关键词（更精确）
+    private val sendRedPacketKeywords = listOf(
+        "发红包", "发出红包", "发了一个红包",
         "塞钱进红包", "红包发送成功", "红包已发送",
-        "个红包", "共发出"  // 微信红包详情页
+        "共发出", "个红包，共"
     )
 
     // 渠道映射 - 使用 Channel 常量
@@ -45,25 +51,25 @@ object TransactionParser {
     fun parse(texts: List<String>, packageName: String): ExpenseEntity? {
         val joined = texts.joinToString(" | ")
         
-        Log.d(TAG, "开始解析, 包名: $packageName")
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "开始解析, 包名: $packageName")
+        }
         
         // 1. 提取金额
         val amount = extractAmount(texts)
         if (amount == null || amount <= 0) {
-            Log.d(TAG, "未找到有效金额")
+            if (BuildConfig.DEBUG) Log.d(TAG, "未找到有效金额")
             return null
         }
-        Log.d(TAG, "找到金额: $amount")
+        if (BuildConfig.DEBUG) Log.d(TAG, "找到金额: ***")
 
         // 2. 判断收入还是支出
         val isIncome = incomeKeywords.any { joined.contains(it) }
         val isExpense = expenseKeywords.any { joined.contains(it) }
-        
-        // 发红包特征：包含"发"和"红包"，或者"塞钱"
-        val isSendRedPacket = (joined.contains("发") && joined.contains("红包")) ||
-                              joined.contains("塞钱") ||
-                              joined.contains("共发出")
-        
+
+        // 发红包判断：使用专门的关键词列表，更精确
+        val isSendRedPacket = sendRedPacketKeywords.any { joined.contains(it) }
+
         val type = when {
             isSendRedPacket -> "expense"  // 发红包优先判断为支出
             isIncome && !isExpense -> "income"
@@ -71,11 +77,13 @@ object TransactionParser {
             joined.contains("红包") -> "income"  // 其他红包场景默认收入
             else -> "expense"
         }
-        Log.d(TAG, "交易类型: $type (isIncome=$isIncome, isExpense=$isExpense, isSendRedPacket=$isSendRedPacket)")
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "交易类型: $type (isIncome=$isIncome, isExpense=$isExpense, isSendRedPacket=$isSendRedPacket)")
+        }
 
         // 3. 提取商户/来源
         val merchant = extractMerchant(texts, joined)
-        Log.d(TAG, "商户: $merchant")
+        if (BuildConfig.DEBUG) Log.d(TAG, "商户: [已隐藏]")
 
         // 4. 分类
         val category = when {
@@ -105,7 +113,8 @@ object TransactionParser {
                 val matcher = pattern.matcher(text)
                 if (matcher.find()) {
                     val amountStr = matcher.group(1) ?: continue
-                    val amount = amountStr.replace(",", "").toDoubleOrNull()
+                    // 使用 BigDecimal 进行精确解析
+                    val amount = AmountUtils.parseAmount(amountStr)
                     if (amount != null && amount > 0 && amount < Constants.MAX_AMOUNT) {
                         return amount
                     }
@@ -124,7 +133,8 @@ object TransactionParser {
             val numPattern = Pattern.compile("^([0-9]+(?:\\.[0-9]{1,2})?)$")
             val matcher = numPattern.matcher(trimmed)
             if (matcher.find()) {
-                val amount = matcher.group(1)?.toDoubleOrNull()
+                // 使用 BigDecimal 进行精确解析
+                val amount = AmountUtils.parseAmount(matcher.group(1))
                 // 排除可能是时间的数字（如 12.30 可能是时间）
                 if (amount != null && amount > 0 && amount < Constants.MAX_AMOUNT) {
                     // 如果是 XX.XX 格式且第一部分 < 24，可能是时间，跳过
@@ -182,14 +192,14 @@ object TransactionParser {
     
     // 解析通知文本
     fun parseNotification(text: String, packageName: String): ExpenseEntity? {
-        Log.d(TAG, "解析通知: $text")
+        if (BuildConfig.DEBUG) Log.d(TAG, "解析通知: [内容已隐藏]")
         
-        // 提取金额
+        // 提取金额（使用 BigDecimal 精确解析）
         var amount: Double? = null
         for (pattern in amountPatterns) {
             val matcher = pattern.matcher(text)
             if (matcher.find()) {
-                val parsed = matcher.group(1)?.replace(",", "")?.toDoubleOrNull()
+                val parsed = AmountUtils.parseAmount(matcher.group(1))
                 // 添加金额上限检查
                 if (parsed != null && parsed > 0 && parsed < Constants.MAX_AMOUNT) {
                     amount = parsed
@@ -199,15 +209,15 @@ object TransactionParser {
         }
 
         if (amount == null || amount <= 0) {
-            Log.d(TAG, "通知中未找到金额")
+            if (BuildConfig.DEBUG) Log.d(TAG, "通知中未找到金额")
             return null
         }
         
         // 判断类型
         val isIncome = incomeKeywords.any { text.contains(it) }
         val isExpense = expenseKeywords.any { text.contains(it) }
-        val isSendRedPacket = (text.contains("发") && text.contains("红包"))
-        
+        val isSendRedPacket = sendRedPacketKeywords.any { text.contains(it) }
+
         val type = when {
             isSendRedPacket -> "expense"
             isIncome -> "income"
