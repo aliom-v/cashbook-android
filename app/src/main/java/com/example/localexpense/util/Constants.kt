@@ -8,7 +8,9 @@ import java.math.RoundingMode
  */
 object Constants {
     // 防重复检测时间间隔（毫秒）
-    const val DUPLICATE_CHECK_INTERVAL_MS = 3000L
+    // 设置为5秒，平衡误过滤和重复记录的风险
+    // 注意：实际判断使用 金额+商户+类型 组合，所以相同金额但不同商户不会被过滤
+    const val DUPLICATE_CHECK_INTERVAL_MS = 5000L
 
     // 原始文本最大长度
     const val RAW_TEXT_MAX_LENGTH = 300
@@ -16,17 +18,60 @@ object Constants {
     // 搜索防抖延迟（毫秒）
     const val SEARCH_DEBOUNCE_MS = 300L
 
-    // 金额最大值（用于过滤异常值）
-    const val MAX_AMOUNT = 1000000.0
+    // 金额最大值（单笔交易上限，用于过滤异常值）
+    // 日常消费很少超过1万，设置为10000可以过滤大部分误识别
+    const val MAX_AMOUNT = 10000.0
 
-    // 商户名称最大长度
-    const val MAX_MERCHANT_NAME_LENGTH = 15
+    // 商户名称最大长度（与RuleEngine保持一致）
+    const val MAX_MERCHANT_NAME_LENGTH = 50
 
     // 通知ID取模范围
     const val NOTIFICATION_ID_MOD = 10000
 
     // 数据库名称
     const val DATABASE_NAME = "local_expense.db"
+
+    // 需要过滤的特殊号码（运营商客服、银行等）
+    val BLACKLIST_AMOUNTS = setOf(
+        // 运营商
+        10086.0,  // 中国移动
+        10010.0,  // 中国联通
+        10000.0,  // 中国电信
+        // 银行客服
+        95588.0,  // 工商银行
+        95533.0,  // 建设银行
+        95566.0,  // 中国银行
+        95555.0,  // 招商银行
+        95568.0,  // 民生银行
+        95599.0,  // 农业银行
+        95528.0,  // 浦发银行
+        95558.0,  // 中信银行
+        95561.0,  // 兴业银行
+        95508.0,  // 广发银行
+        95516.0,  // 银联
+        95559.0,  // 交通银行
+        95595.0,  // 光大银行
+        95511.0,  // 平安银行
+        95526.0,  // 华夏银行
+        95577.0,  // 华夏银行（新）
+        95580.0,  // 邮储银行
+        // 客服热线
+        400.0,    // 400开头的客服
+        800.0,    // 800开头的客服
+        // 紧急服务
+        110.0,    // 报警
+        120.0,    // 急救
+        119.0,    // 火警
+        122.0,    // 交通事故
+        // 公共服务
+        12315.0,  // 消费者投诉
+        12306.0,  // 铁路客服
+        12345.0,  // 政务服务
+        114.0,    // 查号台
+        // 常见误识别
+        1234.0,   // 可能是验证码
+        123456.0  // 可能是密码提示
+    )
 }
 
 /**
@@ -138,5 +183,18 @@ object AmountUtils {
     fun percentage(part: Double, total: Double): Double {
         if (total == 0.0) return 0.0
         return divide(part * 100, total)
+    }
+
+    /**
+     * 验证金额是否有效
+     * - 金额大于0
+     * - 金额小于上限
+     * - 不在黑名单中（如10086等特殊号码）
+     */
+    fun isValidAmount(amount: Double): Boolean {
+        if (amount <= 0) return false
+        if (amount > Constants.MAX_AMOUNT) return false
+        if (amount in Constants.BLACKLIST_AMOUNTS) return false
+        return true
     }
 }

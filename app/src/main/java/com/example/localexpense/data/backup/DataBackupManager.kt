@@ -40,8 +40,14 @@ class DataBackupManager(
 ) {
     private val tag = "DataBackupManager"
 
+    companion object {
+        // 最大备份文件大小：10MB
+        private const val MAX_BACKUP_SIZE = 10 * 1024 * 1024L
+    }
+
     /**
      * 导出数据到 JSON 字符串
+     * 注意：会检查导出数据大小，超过限制会抛出异常
      */
     suspend fun exportToJson(): Result<String> = withContext(Dispatchers.IO) {
         Result.suspendRunCatching {
@@ -59,7 +65,17 @@ class DataBackupManager(
             )
 
             val json = backupToJson(backup)
-            Logger.d(tag) { "导出完成: ${expenses.size} 条账单, ${categories.size} 个分类, ${budgets.size} 条预算" }
+
+            // 检查导出数据大小，防止生成过大的备份文件
+            val jsonSize = json.toByteArray(Charsets.UTF_8).size.toLong()
+            if (jsonSize > MAX_BACKUP_SIZE) {
+                throw IllegalStateException(
+                    "导出数据过大（${jsonSize / 1024 / 1024}MB），超过最大限制 ${MAX_BACKUP_SIZE / 1024 / 1024}MB。" +
+                    "建议清理部分历史数据后重试。"
+                )
+            }
+
+            Logger.d(tag) { "导出完成: ${expenses.size} 条账单, ${categories.size} 个分类, ${budgets.size} 条预算, 大小: ${jsonSize / 1024}KB" }
 
             json
         }
@@ -85,11 +101,15 @@ class DataBackupManager(
 
     /**
      * 从 JSON 字符串导入数据
+     *
+     * 注意：非合并模式下，只有在数据解析成功后才会清空现有数据，
+     * 以避免解析失败导致数据丢失
      */
     suspend fun importFromJson(json: String, merge: Boolean = false): Result<ImportResult> = withContext(Dispatchers.IO) {
         Result.suspendRunCatching {
             Logger.d(tag) { "开始导入数据, 合并模式: $merge" }
 
+            // 1. 先解析数据，确保格式正确（不清空数据）
             val backup = jsonToBackup(json)
 
             // 验证版本
@@ -97,15 +117,18 @@ class DataBackupManager(
                 throw IllegalArgumentException("备份版本过高(${backup.version})，请更新应用后重试")
             }
 
+            // 2. 数据解析成功后，再清空现有数据（非合并模式）
             if (!merge) {
-                // 清空现有数据
                 repository.clearAllData()
             }
 
-            // 导入数据
+            // 3. 导入数据，统计成功和失败数量
             var importedExpenses = 0
+            var failedExpenses = 0
             var importedCategories = 0
+            var failedCategories = 0
             var importedBudgets = 0
+            var failedBudgets = 0
 
             // 先导入分类（账单依赖分类）
             backup.categories.forEach { category ->
@@ -113,6 +136,7 @@ class DataBackupManager(
                     repository.insertCategory(category.copy(id = 0))
                     importedCategories++
                 } catch (e: Exception) {
+                    failedCategories++
                     Logger.w(tag, "导入分类失败: ${category.name}", e)
                 }
             }
@@ -123,6 +147,7 @@ class DataBackupManager(
                     repository.insertExpense(expense.copy(id = 0))
                     importedExpenses++
                 } catch (e: Exception) {
+                    failedExpenses++
                     Logger.w(tag, "导入账单失败: ${expense.merchant}", e)
                 }
             }
@@ -133,6 +158,7 @@ class DataBackupManager(
                     repository.insertBudget(budget.copy(id = 0))
                     importedBudgets++
                 } catch (e: Exception) {
+                    failedBudgets++
                     Logger.w(tag, "导入预算失败: month=${budget.month}", e)
                 }
             }
@@ -142,10 +168,13 @@ class DataBackupManager(
             ImportResult(
                 totalExpenses = backup.expenses.size,
                 importedExpenses = importedExpenses,
+                failedExpenses = failedExpenses,
                 totalCategories = backup.categories.size,
                 importedCategories = importedCategories,
+                failedCategories = failedCategories,
                 totalBudgets = backup.budgets.size,
-                importedBudgets = importedBudgets
+                importedBudgets = importedBudgets,
+                failedBudgets = failedBudgets
             )
         }
     }
@@ -155,6 +184,15 @@ class DataBackupManager(
      */
     suspend fun importFromUri(uri: Uri, merge: Boolean = false): Result<ImportResult> = withContext(Dispatchers.IO) {
         Result.suspendRunCatching {
+            // 检查文件大小，防止内存溢出
+            val fileSize = context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+            if (fileSize > MAX_BACKUP_SIZE) {
+                throw IllegalArgumentException("备份文件过大（${fileSize / 1024 / 1024}MB），最大支持 10MB")
+            }
+            if (fileSize == 0L) {
+                throw IllegalArgumentException("备份文件为空")
+            }
+
             val json = context.contentResolver.openInputStream(uri)?.use { input ->
                 input.bufferedReader().readText()
             } ?: throw IllegalStateException("无法读取文件")
@@ -189,7 +227,17 @@ class DataBackupManager(
     }
 
     private fun jsonToBackup(json: String): BackupData {
-        val root = JSONObject(json)
+        val root = try {
+            JSONObject(json)
+        } catch (e: Exception) {
+            throw IllegalArgumentException("备份文件格式错误，无法解析 JSON", e)
+        }
+
+        // 验证必要字段存在（必须同时包含 expenses 和 categories）
+        if (!root.has("expenses") || !root.has("categories")) {
+            throw IllegalArgumentException("备份文件格式错误，缺少必要数据（需要包含 expenses 和 categories）")
+        }
+
         return BackupData(
             version = root.optInt("version", 1),
             timestamp = root.optLong("timestamp", 0),
@@ -290,11 +338,27 @@ class DataBackupManager(
 data class ImportResult(
     val totalExpenses: Int,
     val importedExpenses: Int,
+    val failedExpenses: Int = 0,
     val totalCategories: Int,
     val importedCategories: Int,
+    val failedCategories: Int = 0,
     val totalBudgets: Int,
-    val importedBudgets: Int
+    val importedBudgets: Int,
+    val failedBudgets: Int = 0
 ) {
+    val hasFailures: Boolean
+        get() = failedExpenses > 0 || failedCategories > 0 || failedBudgets > 0
+
     val summary: String
-        get() = "成功导入 $importedExpenses 条账单、$importedCategories 个分类、$importedBudgets 条预算"
+        get() = buildString {
+            append("成功导入 $importedExpenses 条账单、$importedCategories 个分类、$importedBudgets 条预算")
+            if (hasFailures) {
+                append("\n")
+                val failures = mutableListOf<String>()
+                if (failedExpenses > 0) failures.add("$failedExpenses 条账单")
+                if (failedCategories > 0) failures.add("$failedCategories 个分类")
+                if (failedBudgets > 0) failures.add("$failedBudgets 条预算")
+                append("(${failures.joinToString("、")}导入失败)")
+            }
+        }
 }

@@ -177,26 +177,32 @@ fun AddExpenseDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Merchant input
+                // Merchant input (限制长度50字符)
                 OutlinedTextField(
                     value = merchant,
-                    onValueChange = { merchant = it },
+                    onValueChange = { if (it.length <= 50) merchant = it },
                     label = { Text("商户/来源") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    supportingText = if (merchant.length >= 45) {
+                        { Text("${merchant.length}/50") }
+                    } else null
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Note input
+                // Note input (限制长度100字符)
                 OutlinedTextField(
                     value = note,
-                    onValueChange = { note = it },
+                    onValueChange = { if (it.length <= 100) note = it },
                     label = { Text("备注") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    supportingText = if (note.length >= 90) {
+                        { Text("${note.length}/100") }
+                    } else null
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -221,12 +227,30 @@ fun AddExpenseDialog(
                 Spacer(modifier = Modifier.height(24.dp))
 
                 // Save button
-                val isAmountValid = amount.toDoubleOrNull()?.let { it > 0 } == true
-                
+                // 验证金额：大于0且不超过上限（防止误输入）
+                val maxAmount = 1000000.0  // 100万上限
+                val amountValue = amount.toDoubleOrNull()
+                val isAmountValid = amountValue != null && amountValue > 0 && amountValue <= maxAmount
+                val amountError = when {
+                    amountValue == null -> null
+                    amountValue <= 0 -> "金额必须大于0"
+                    amountValue > maxAmount -> "金额不能超过100万"
+                    else -> null
+                }
+
+                // 显示金额错误提示
+                if (amountError != null && amount.isNotEmpty()) {
+                    Text(
+                        text = amountError,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+
                 Button(
                     onClick = {
-                        val amountValue = amount.toDoubleOrNull()
-                        if (amountValue == null || amountValue <= 0) {
+                        if (amountValue == null || amountValue <= 0 || amountValue > maxAmount) {
                             // 金额无效，不保存
                             return@Button
                         }

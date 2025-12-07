@@ -35,8 +35,12 @@ data class UiState(
     val monthlyExpense: Double = 0.0,
     val monthlyIncome: Double = 0.0,
     val budget: BudgetEntity? = null,
+    // 支出统计
     val categoryStats: List<CategoryStat> = emptyList(),
     val dailyStats: List<DailyStat> = emptyList(),
+    // 收入统计
+    val incomeCategoryStats: List<CategoryStat> = emptyList(),
+    val incomeDailyStats: List<DailyStat> = emptyList(),
     val searchQuery: String = "",
     val searchResults: List<ExpenseEntity> = emptyList(),
     val selectedCalendarDate: String = DateUtils.getTodayString(),
@@ -94,60 +98,118 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
                     // 计算分组
                     val grouped = expenses.groupBy { DateUtils.formatDate(it.timestamp) }
 
-                    _state.value.copy(
-                        expenses = expenses,
-                        groupedExpenses = grouped,
-                        categories = categories,
-                        monthlyExpense = monthlyStats.first,
-                        monthlyIncome = monthlyStats.second,
-                        budget = budget,
-                        isLoading = false,
-                        error = null
-                    )
-                }.collect { newState ->
-                    _state.value = newState
+                    // 返回更新数据用于原子更新
+                    DataUpdate(expenses, grouped, categories, monthlyStats, budget)
+                }.collect { data ->
+                    // 使用 update 原子更新，避免并发状态覆盖
+                    _state.update { current ->
+                        current.copy(
+                            expenses = data.expenses,
+                            groupedExpenses = data.grouped,
+                            categories = data.categories,
+                            monthlyExpense = data.monthlyStats.first,
+                            monthlyIncome = data.monthlyStats.second,
+                            budget = data.budget,
+                            isLoading = false,
+                            error = null
+                        )
+                    }
                 }
             } catch (e: Exception) {
                 updateError("加载数据失败: ${e.message}")
-                _state.value = _state.value.copy(isLoading = false)
+                _state.update { it.copy(isLoading = false) }
             }
         }
     }
 
+    // 统计刷新触发器（手动触发或数据变化时触发）
+    private val _statsRefreshTrigger = MutableStateFlow(0L)
+
     /**
      * 设置统计数据的响应式加载
-     * 同时响应：1. 统计参数变化  2. 数据库记录变化
+     * 同时响应：1. 统计参数变化  2. 手动刷新触发
+     * 同时加载支出和收入的统计数据
+     *
+     * 优化：不再监听整个数据库变化，改为通过 refreshStats() 手动触发
+     * 这样可以避免频繁的统计查询，提高性能
      */
     private fun setupStats() {
         viewModelScope.launch {
-            // 合并统计参数变化和数据库变化，响应式更新统计数据
+            // 合并统计参数变化和刷新触发器
             combine(
                 _statsPeriod,
                 _statsDateMillis,
-                repo.getAllFlow().map { it.size } // 监听数据库变化，使用 size 作为触发器
+                _statsRefreshTrigger
             ) { period, dateMillis, _ ->
                 val calendar = Calendar.getInstance().apply { timeInMillis = dateMillis }
                 val (start, end) = DateUtils.getDateRange(calendar, period)
                 Triple(period, dateMillis, Pair(start, end))
             }.flatMapLatest { (period, dateMillis, range) ->
                 val (start, end) = range
+                // 同时查询支出和收入的统计数据
                 combine(
                     repo.getCategoryStats("expense", start, end),
-                    repo.getDailyStats("expense", start, end)
-                ) { categoryStats, dailyStats ->
-                    Triple(Pair(period, dateMillis), categoryStats, dailyStats)
+                    repo.getDailyStats("expense", start, end),
+                    repo.getCategoryStats("income", start, end),
+                    repo.getDailyStats("income", start, end)
+                ) { expenseCategoryStats, expenseDailyStats, incomeCategoryStats, incomeDailyStats ->
+                    StatsData(
+                        period = period,
+                        dateMillis = dateMillis,
+                        expenseCategoryStats = expenseCategoryStats,
+                        expenseDailyStats = expenseDailyStats,
+                        incomeCategoryStats = incomeCategoryStats,
+                        incomeDailyStats = incomeDailyStats
+                    )
                 }
-            }.collect { (params, categoryStats, dailyStats) ->
-                val (period, dateMillis) = params
-                _state.value = _state.value.copy(
-                    statsPeriod = period,
-                    statsDateMillis = dateMillis,
-                    categoryStats = categoryStats,
-                    dailyStats = dailyStats
-                )
+            }
+            .catch { e ->
+                // Flow 异常处理，避免整个统计流崩溃
+                if (BuildConfig.DEBUG) Log.e(TAG, "统计数据加载失败", e)
+                updateError("统计加载失败: ${e.message}")
+            }
+            .collect { statsData ->
+                // 使用 update 原子更新，避免并发状态覆盖
+                _state.update { current ->
+                    current.copy(
+                        statsPeriod = statsData.period,
+                        statsDateMillis = statsData.dateMillis,
+                        categoryStats = statsData.expenseCategoryStats,
+                        dailyStats = statsData.expenseDailyStats,
+                        incomeCategoryStats = statsData.incomeCategoryStats,
+                        incomeDailyStats = statsData.incomeDailyStats
+                    )
+                }
             }
         }
     }
+
+    /**
+     * 手动刷新统计数据
+     * 在添加/删除交易后调用
+     */
+    fun refreshStats() {
+        _statsRefreshTrigger.value = System.currentTimeMillis()
+    }
+
+    // 主数据更新的临时数据类（用于原子更新）
+    private data class DataUpdate(
+        val expenses: List<ExpenseEntity>,
+        val grouped: Map<String, List<ExpenseEntity>>,
+        val categories: List<CategoryEntity>,
+        val monthlyStats: Pair<Double, Double>,
+        val budget: BudgetEntity?
+    )
+
+    // 统计数据的临时数据类
+    private data class StatsData(
+        val period: DateUtils.StatsPeriod,
+        val dateMillis: Long,
+        val expenseCategoryStats: List<CategoryStat>,
+        val expenseDailyStats: List<DailyStat>,
+        val incomeCategoryStats: List<CategoryStat>,
+        val incomeDailyStats: List<DailyStat>
+    )
 
     private fun loadMonthlyStatsFlow(): Flow<Pair<Double, Double>> {
         val (monthStart, monthEnd) = DateUtils.getCurrentMonthRange()
@@ -179,8 +241,13 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
                         repo.search(query)
                     }
                 }
+                .catch { e ->
+                    // 搜索异常处理
+                    if (BuildConfig.DEBUG) Log.e(TAG, "搜索失败", e)
+                    emit(emptyList())
+                }
                 .collect { results ->
-                    _state.value = _state.value.copy(searchResults = results)
+                    _state.update { it.copy(searchResults = results) }
                 }
         }
     }
@@ -197,6 +264,8 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
                     repo.updateExpense(expense)
                     logD { "Expense updated: id=${expense.id}" }
                 }
+                // 刷新统计数据
+                refreshStats()
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "保存失败", e)
                 updateError("保存失败: ${e.message}")
@@ -208,6 +277,8 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
         viewModelScope.launch {
             try {
                 repo.deleteExpense(expense)
+                // 刷新统计数据
+                refreshStats()
             } catch (e: Exception) {
                 updateError("删除失败: ${e.message}")
             }
@@ -216,17 +287,17 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
 
     // Search - 使用防抖
     fun search(query: String) {
-        _state.value = _state.value.copy(searchQuery = query)
+        _state.update { it.copy(searchQuery = query) }
         _searchQuery.value = query
     }
 
     // Calendar
     fun selectCalendarDate(date: String) {
-        _state.value = _state.value.copy(selectedCalendarDate = date)
+        _state.update { it.copy(selectedCalendarDate = date) }
     }
 
     fun setCalendarMonth(calendar: Calendar) {
-        _state.value = _state.value.copy(calendarMonthMillis = calendar.timeInMillis)
+        _state.update { it.copy(calendarMonthMillis = calendar.timeInMillis) }
     }
 
     // Stats - 通过更新 Flow 触发响应式加载
@@ -243,13 +314,12 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
         val currentMonth = DateUtils.getCurrentMonthId()
         viewModelScope.launch {
             try {
-                repo.insertBudget(
-                    BudgetEntity(
-                        id = _state.value.budget?.id ?: 0,
-                        amount = amount,
-                        month = currentMonth
-                    )
+                val budget = BudgetEntity.create(
+                    id = _state.value.budget?.id ?: 0,
+                    amount = amount,
+                    month = currentMonth
                 )
+                repo.insertBudget(budget)
             } catch (e: Exception) {
                 updateError("保存预算失败: ${e.message}")
             }
@@ -279,11 +349,11 @@ class MainViewModel(private val repo: TransactionRepository) : ViewModel() {
 
     // Error handling
     private fun updateError(message: String) {
-        _state.value = _state.value.copy(error = message)
+        _state.update { it.copy(error = message) }
     }
 
     fun clearError() {
-        _state.value = _state.value.copy(error = null)
+        _state.update { it.copy(error = null) }
     }
 
     companion object {

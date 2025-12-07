@@ -60,22 +60,10 @@ class TransactionRepository private constructor(context: Context) {
      * 用于确保在插入数据前，默认分类已初始化
      */
     suspend fun waitForInitialization() {
-        initMutex.withLock {
-            // 持有锁并检查初始化状态
-            if (!isInitialized) {
-                // 如果未初始化，直接在锁内执行初始化逻辑
-                try {
-                    val count = categoryDao.count()
-                    if (count == 0) {
-                        categoryDao.insertAll(DefaultCategories.expense + DefaultCategories.income)
-                        android.util.Log.i("TransactionRepo", "默认分类初始化完成")
-                    }
-                    isInitialized = true
-                } catch (e: Exception) {
-                    android.util.Log.e("TransactionRepo", "waitForInitialization 失败: ${e.message}", e)
-                }
-            }
-        }
+        // 快速路径：已初始化则直接返回
+        if (isInitialized) return
+        // 否则调用内部初始化方法（会获取锁并检查）
+        initDefaultCategoriesInternal()
     }
 
     /**
@@ -89,7 +77,12 @@ class TransactionRepository private constructor(context: Context) {
     }
 
     // Expense operations - 异步插入，使用协程
-    fun insertTransaction(entity: ExpenseEntity) {
+    /**
+     * 异步插入交易记录
+     * @param entity 交易实体
+     * @param onError 可选的错误回调，在主线程调用
+     */
+    fun insertTransaction(entity: ExpenseEntity, onError: ((String) -> Unit)? = null) {
         repositoryScope.launch {
             try {
                 // 等待初始化完成
@@ -97,6 +90,12 @@ class TransactionRepository private constructor(context: Context) {
                 expenseDao.insert(entity)
             } catch (e: Exception) {
                 android.util.Log.e("TransactionRepo", "插入失败: ${e.message}", e)
+                // 在主线程回调错误信息
+                onError?.let { callback ->
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        callback("记账失败: ${e.message}")
+                    }
+                }
             }
         }
     }
@@ -137,12 +136,15 @@ class TransactionRepository private constructor(context: Context) {
 
     /**
      * 转义 SQL LIKE 查询中的特殊字符
+     * 包括：\ % _ [ ] （SQLite 支持方括号作为字符类通配符）
      */
     private fun escapeSqlLike(query: String): String {
         return query
             .replace("\\", "\\\\")
             .replace("%", "\\%")
             .replace("_", "\\_")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
     }
 
     fun getTotalExpense(start: Long, end: Long) = expenseDao.getTotalExpense(start, end)
@@ -168,10 +170,11 @@ class TransactionRepository private constructor(context: Context) {
 
     suspend fun deleteCategory(category: CategoryEntity) = categoryDao.delete(category)
 
+    /**
+     * 初始化默认分类（公开方法，内部调用受保护的初始化逻辑）
+     */
     suspend fun initDefaultCategories() {
-        if (categoryDao.count() == 0) {
-            categoryDao.insertAll(DefaultCategories.expense + DefaultCategories.income)
-        }
+        initDefaultCategoriesInternal()
     }
 
     // Budget operations
@@ -195,6 +198,24 @@ class TransactionRepository private constructor(context: Context) {
         expenseDao.deleteAll()
         categoryDao.deleteAll()
         budgetDao.deleteAll()
+    }
+
+    /**
+     * 删除指定时间之前的账单数据
+     * @param beforeTimestamp 时间戳（毫秒）
+     * @return 删除的记录数
+     */
+    suspend fun deleteExpensesBeforeDate(beforeTimestamp: Long): Int {
+        return expenseDao.deleteBeforeDate(beforeTimestamp)
+    }
+
+    /**
+     * 统计指定时间之前的账单数量
+     * @param beforeTimestamp 时间戳（毫秒）
+     * @return 记录数
+     */
+    suspend fun countExpensesBeforeDate(beforeTimestamp: Long): Int {
+        return expenseDao.countBeforeDate(beforeTimestamp)
     }
 
     companion object {

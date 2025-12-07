@@ -125,5 +125,11 @@ dependencies {
     // Charts - Vico
     implementation("com.patrykandpatrick.vico:compose-m3:1.13.1")
 
+    // Google ML Kit - OCR (文字识别，中文优化)
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
+
+    // CardView for FloatingWindow
+    implementation("androidx.cardview:cardview:1.0.0")
+
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

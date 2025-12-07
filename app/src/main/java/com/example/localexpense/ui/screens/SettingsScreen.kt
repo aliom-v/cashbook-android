@@ -37,6 +37,7 @@ import com.example.localexpense.data.backup.DataBackupManager
 import com.example.localexpense.domain.Result
 import com.example.localexpense.ui.theme.ExpenseTheme
 import com.example.localexpense.ui.util.IconUtil
+import com.example.localexpense.util.MonitorSettings
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -57,6 +58,7 @@ fun SettingsScreen(
     var showExportDialog by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
     var showRestoreDialog by remember { mutableStateOf(false) }
+    var showCleanupDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -147,19 +149,134 @@ fun SettingsScreen(
                     subtitle = "从 JSON 备份文件恢复",
                     onClick = { showRestoreDialog = true }
                 )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                SettingsItem(
+                    icon = Icons.Default.CleaningServices,
+                    title = "清理旧数据",
+                    subtitle = "删除指定时间前的账单",
+                    onClick = { showCleanupDialog = true }
+                )
             }
         }
 
         // Accessibility section
         item {
+            // 监听状态 - 使用 refreshKey 触发刷新（从无障碍设置返回后自动更新）
+            var isMonitorEnabled by remember(refreshKey) {
+                mutableStateOf(MonitorSettings.isMonitorEnabled(context))
+            }
+            val monitorStartTime = remember(isMonitorEnabled, refreshKey) {
+                MonitorSettings.getFormattedStartTime(context)
+            }
+            // 显示提示对话框
+            var showAccessibilityPrompt by remember { mutableStateOf(false) }
+
             SettingsCard(title = "自动记账") {
+                // 监听开关
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        tint = if (isMonitorEnabled && isAccessibilityEnabled)
+                            ExpenseTheme.colors.income
+                        else
+                            MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = when {
+                                isMonitorEnabled && isAccessibilityEnabled -> "监听中"
+                                isMonitorEnabled && !isAccessibilityEnabled -> "等待启用无障碍"
+                                else -> "开始监听"
+                            },
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = when {
+                                isMonitorEnabled && isAccessibilityEnabled -> "开始于 $monitorStartTime"
+                                isMonitorEnabled && !isAccessibilityEnabled -> "请先开启无障碍服务"
+                                else -> "点击开始记录新交易"
+                            },
+                            fontSize = 13.sp,
+                            color = if (isMonitorEnabled && !isAccessibilityEnabled)
+                                MaterialTheme.colorScheme.error
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = isMonitorEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled && !isAccessibilityEnabled) {
+                                // 无障碍服务未启用，显示提示对话框
+                                showAccessibilityPrompt = true
+                            } else {
+                                MonitorSettings.setMonitorEnabled(context, enabled)
+                                isMonitorEnabled = enabled
+                                if (enabled) {
+                                    Toast.makeText(context, "开始监听，之后的交易将被记录", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "已停止监听", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // 无障碍未启用提示对话框
+                if (showAccessibilityPrompt) {
+                    AlertDialog(
+                        onDismissRequest = { showAccessibilityPrompt = false },
+                        icon = {
+                            Icon(
+                                Icons.Default.Accessibility,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        title = { Text("需要开启无障碍服务") },
+                        text = {
+                            Text("自动记账功能需要无障碍服务支持。\n\n开启后，监听功能将自动启用。")
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showAccessibilityPrompt = false
+                                    // 先开启监听（等待无障碍服务启用后生效）
+                                    MonitorSettings.setMonitorEnabled(context, true)
+                                    isMonitorEnabled = true
+                                    // 跳转到无障碍设置
+                                    onOpenAccessibility()
+                                }
+                            ) {
+                                Text("去开启")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showAccessibilityPrompt = false }) {
+                                Text("取消")
+                            }
+                        }
+                    )
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                // 无障碍服务
                 SettingsItem(
                     icon = Icons.Default.Accessibility,
                     title = "无障碍服务",
                     subtitle = if (isAccessibilityEnabled)
-                        "已启用 - 正在监听微信/支付宝"
+                        "已启用"
                     else
-                        "未启用 - 点击开启自动记账",
+                        "未启用 - 点击开启",
                     onClick = onOpenAccessibility,
                     trailing = {
                         if (isAccessibilityEnabled) {
@@ -172,18 +289,89 @@ fun SettingsScreen(
                         }
                     }
                 )
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                // 支持的应用
+                SettingsItem(
+                    icon = Icons.Default.Apps,
+                    title = "支持的应用",
+                    subtitle = "微信、支付宝、云闪付",
+                    onClick = {}
+                )
             }
         }
 
         // About section
         item {
+            // 调试日志开关
+            var isDebugLogEnabled by remember {
+                mutableStateOf(MonitorSettings.isDebugLogEnabled(context))
+            }
+
+            // 动态获取版本号
+            val versionName = remember {
+                try {
+                    val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                    packageInfo.versionName ?: "未知"
+                } catch (e: Exception) {
+                    "未知"
+                }
+            }
+
             SettingsCard(title = "关于") {
                 SettingsItem(
                     icon = Icons.Default.Info,
                     title = "版本",
-                    subtitle = "1.0.0",
+                    subtitle = versionName,
                     onClick = {}
                 )
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                // 数据统计
+                SettingsItem(
+                    icon = Icons.Default.Storage,
+                    title = "数据统计",
+                    subtitle = "${expenses.size} 条账单 · ${categories.size} 个分类",
+                    onClick = {}
+                )
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                // 调试日志开关
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.BugReport,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "调试日志",
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (isDebugLogEnabled) "已启用详细日志" else "仅记录基本日志",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = isDebugLogEnabled,
+                        onCheckedChange = { enabled ->
+                            MonitorSettings.setDebugLogEnabled(context, enabled)
+                            isDebugLogEnabled = enabled
+                        }
+                    )
+                }
             }
         }
     }
@@ -236,6 +424,15 @@ fun SettingsScreen(
             context = context,
             scope = scope,
             onDismiss = { showRestoreDialog = false }
+        )
+    }
+
+    // Cleanup dialog
+    if (showCleanupDialog) {
+        CleanupDialog(
+            context = context,
+            scope = scope,
+            onDismiss = { showCleanupDialog = false }
         )
     }
 }
@@ -322,7 +519,18 @@ private fun BudgetDialog(
         text = {
             OutlinedTextField(
                 value = budgetText,
-                onValueChange = { budgetText = it.filter { c -> c.isDigit() || c == '.' } },
+                onValueChange = { newValue ->
+                    // 只允许数字和最多一个小数点，且小数点后最多2位
+                    val filtered = newValue.filter { c -> c.isDigit() || c == '.' }
+                    val dotCount = filtered.count { it == '.' }
+                    if (dotCount <= 1) {
+                        // 检查小数位数不超过2位
+                        val parts = filtered.split('.')
+                        if (parts.size <= 1 || parts[1].length <= 2) {
+                            budgetText = filtered
+                        }
+                    }
+                },
                 label = { Text("预算金额") },
                 prefix = { Text("¥") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -331,9 +539,12 @@ private fun BudgetDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = {
-                budgetText.toDoubleOrNull()?.let { onSave(it) }
-            }) { Text("保存") }
+            TextButton(
+                onClick = {
+                    budgetText.toDoubleOrNull()?.takeIf { it > 0 }?.let { onSave(it) }
+                },
+                enabled = budgetText.toDoubleOrNull()?.let { it > 0 } == true
+            ) { Text("保存") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
@@ -831,4 +1042,144 @@ private fun RestoreDialog(
             }
         }
     )
+}
+
+/**
+ * 清理数据对话框
+ */
+@Composable
+private fun CleanupDialog(
+    context: Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onDismiss: () -> Unit
+) {
+    val repository = remember { TransactionRepository.getInstance(context) }
+    var selectedPeriod by remember { mutableStateOf(3) } // 默认3个月
+    var isLoading by remember { mutableStateOf(false) }
+    var countToDelete by remember { mutableStateOf<Int?>(null) }
+    var showConfirm by remember { mutableStateOf(false) }
+
+    val periodOptions = listOf(
+        1 to "1 个月前",
+        3 to "3 个月前",
+        6 to "6 个月前",
+        12 to "1 年前"
+    )
+
+    // 计算要删除的记录数
+    LaunchedEffect(selectedPeriod) {
+        val calendar = java.util.Calendar.getInstance()
+        calendar.add(java.util.Calendar.MONTH, -selectedPeriod)
+        val beforeTimestamp = calendar.timeInMillis
+        countToDelete = repository.countExpensesBeforeDate(beforeTimestamp)
+    }
+
+    if (showConfirm) {
+        // 确认删除对话框
+        AlertDialog(
+            onDismissRequest = { if (!isLoading) showConfirm = false },
+            icon = { Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("确认删除") },
+            text = {
+                Column {
+                    Text("即将删除 ${countToDelete ?: 0} 条账单记录，此操作不可撤销！")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "建议在删除前先备份数据。",
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        isLoading = true
+                        scope.launch {
+                            val calendar = java.util.Calendar.getInstance()
+                            calendar.add(java.util.Calendar.MONTH, -selectedPeriod)
+                            val deletedCount = repository.deleteExpensesBeforeDate(calendar.timeInMillis)
+                            Toast.makeText(context, "已删除 $deletedCount 条记录", Toast.LENGTH_SHORT).show()
+                            isLoading = false
+                            onDismiss()
+                        }
+                    },
+                    enabled = !isLoading,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                    } else {
+                        Text("确认删除")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirm = false }, enabled = !isLoading) {
+                    Text("取消")
+                }
+            }
+        )
+    } else {
+        // 选择时间段对话框
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("清理旧数据") },
+            text = {
+                Column {
+                    Text("选择要删除的数据时间范围：")
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    periodOptions.forEach { (months, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedPeriod = months }
+                                .padding(vertical = 8.dp)
+                        ) {
+                            RadioButton(
+                                selected = selectedPeriod == months,
+                                onClick = { selectedPeriod = months }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(label)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Info,
+                            null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (countToDelete != null) "将删除 $countToDelete 条记录" else "计算中...",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showConfirm = true },
+                    enabled = (countToDelete ?: 0) > 0
+                ) {
+                    Text("下一步")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 }

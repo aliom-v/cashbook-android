@@ -49,6 +49,14 @@ interface ExpenseDao {
 
     @Query("DELETE FROM expense")
     suspend fun deleteAll()
+
+    // 删除指定时间之前的数据
+    @Query("DELETE FROM expense WHERE timestamp < :beforeTimestamp")
+    suspend fun deleteBeforeDate(beforeTimestamp: Long): Int
+
+    // 统计指定时间之前的数据数量
+    @Query("SELECT COUNT(*) FROM expense WHERE timestamp < :beforeTimestamp")
+    suspend fun countBeforeDate(beforeTimestamp: Long): Int
 }
 
 data class CategoryStat(

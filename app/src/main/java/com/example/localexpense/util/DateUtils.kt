@@ -25,6 +25,12 @@ object DateUtils {
     private val exportDateFormat = ThreadLocal.withInitial {
         SimpleDateFormat("yyyyMMdd", Locale.getDefault())
     }
+    private val monthYearFormat = ThreadLocal.withInitial {
+        SimpleDateFormat("yyyy年MM月", Locale.getDefault())
+    }
+    private val shortDateFormat = ThreadLocal.withInitial {
+        SimpleDateFormat("MM月dd日", Locale.getDefault())
+    }
 
     // 安全获取 ThreadLocal 值，如果为 null 则创建新实例
     private fun getDateFormatter(): SimpleDateFormat =
@@ -41,6 +47,12 @@ object DateUtils {
 
     private fun getExportDateFormatter(): SimpleDateFormat =
         exportDateFormat.get() ?: SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+
+    private fun getMonthYearFormatter(): SimpleDateFormat =
+        monthYearFormat.get() ?: SimpleDateFormat("yyyy年MM月", Locale.getDefault())
+
+    private fun getShortDateFormatter(): SimpleDateFormat =
+        shortDateFormat.get() ?: SimpleDateFormat("MM月dd日", Locale.getDefault())
 
     /**
      * 统计周期
@@ -155,5 +167,45 @@ object DateUtils {
      */
     fun getTodayString(): String {
         return getDateFormatter().format(Date())
+    }
+
+    /**
+     * 格式化年月 (yyyy年MM月)
+     */
+    fun formatMonthYear(timestamp: Long): String {
+        return getMonthYearFormatter().format(Date(timestamp))
+    }
+
+    /**
+     * 格式化年月 (yyyy年MM月) - Calendar版本
+     */
+    fun formatMonthYear(calendar: Calendar): String {
+        return getMonthYearFormatter().format(calendar.time)
+    }
+
+    /**
+     * 格式化短日期 (MM月dd日)
+     */
+    fun formatShortDate(timestamp: Long): String {
+        return getShortDateFormatter().format(Date(timestamp))
+    }
+
+    /**
+     * 格式化短日期 (MM月dd日) - 从日期字符串
+     */
+    fun formatShortDate(dateString: String): String {
+        return try {
+            val date = getDateFormatter().parse(dateString) ?: return dateString
+            getShortDateFormatter().format(date)
+        } catch (e: Exception) {
+            dateString
+        }
+    }
+
+    /**
+     * 从时间戳格式化为日期字符串 (用于分组)
+     */
+    fun formatDateFromTimestamp(timestamp: Long): String {
+        return getDateFormatter().format(Date(timestamp))
     }
 }

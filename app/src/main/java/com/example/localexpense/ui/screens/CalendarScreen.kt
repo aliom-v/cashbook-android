@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.localexpense.data.ExpenseEntity
 import com.example.localexpense.ui.theme.ExpenseTheme
-import java.text.SimpleDateFormat
+import com.example.localexpense.util.DateUtils
 import java.util.*
 
 @Composable
@@ -35,11 +35,9 @@ fun CalendarScreen(
     onMonthChange: (Calendar) -> Unit,
     onExpenseClick: (ExpenseEntity) -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
-
-    // 使用 remember 缓存分组结果
+    // 使用 remember 缓存分组结果，使用 DateUtils 的线程安全方法
     val expensesByDate = remember(expenses) {
-        expenses.groupBy { dateFormat.format(Date(it.timestamp)) }
+        expenses.groupBy { DateUtils.formatDate(it.timestamp) }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -65,7 +63,7 @@ fun CalendarScreen(
                     }
 
                     Text(
-                        text = SimpleDateFormat("yyyy年MM月", Locale.getDefault()).format(currentMonth.time),
+                        text = DateUtils.formatMonthYear(currentMonth),
                         fontWeight = FontWeight.Bold,
                         fontSize = 18.sp
                     )
@@ -118,12 +116,9 @@ fun CalendarScreen(
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                val displayDateFormat = remember { SimpleDateFormat("MM月dd日", Locale.getDefault()) }
+                // 使用 DateUtils 的线程安全方法格式化日期
                 val displayDate = remember(selectedDate) {
-                    try {
-                        val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(selectedDate)
-                        displayDateFormat.format(date!!)
-                    } catch (e: Exception) { selectedDate }
+                    DateUtils.formatShortDate(selectedDate)
                 }
 
                 Text(
@@ -192,8 +187,8 @@ private fun CalendarGrid(
     expensesByDate: Map<String, List<ExpenseEntity>>,
     onDateSelect: (String) -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
-    val today = remember { dateFormat.format(Date()) }
+    // 使用 DateUtils 的线程安全方法
+    val today = remember { DateUtils.getTodayString() }
 
     val firstDayOfMonth = currentMonth.clone() as Calendar
     firstDayOfMonth.set(Calendar.DAY_OF_MONTH, 1)
@@ -215,7 +210,7 @@ private fun CalendarGrid(
                     if (dayNumber in 1..daysInMonth) {
                         val cal = currentMonth.clone() as Calendar
                         cal.set(Calendar.DAY_OF_MONTH, dayNumber)
-                        val dateStr = dateFormat.format(cal.time)
+                        val dateStr = DateUtils.formatDate(cal.timeInMillis)
                         val hasExpense = expensesByDate.containsKey(dateStr)
                         val isSelected = dateStr == selectedDate
                         val isToday = dateStr == today
@@ -292,7 +287,6 @@ private fun ExpenseListItem(
     onClick: () -> Unit
 ) {
     val isExpense = expense.type == "expense"
-    val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
     Surface(
         modifier = Modifier
@@ -312,7 +306,7 @@ private fun ExpenseListItem(
                     fontSize = 14.sp
                 )
                 Text(
-                    text = "${expense.category} · ${timeFormat.format(Date(expense.timestamp))}",
+                    text = "${expense.category} · ${DateUtils.formatTime(expense.timestamp)}",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

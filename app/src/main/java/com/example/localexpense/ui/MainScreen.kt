@@ -191,17 +191,27 @@ fun MainScreen(
                     )
                 }
                 Screen.STATS -> {
-                    val (start, end) = DateUtils.getDateRange(state.statsDate, state.statsPeriod)
-                    val periodExpense = state.expenses
-                        .filter { it.type == "expense" && it.timestamp in start until end }
-                        .sumOf { it.amount }
-                    val periodIncome = state.expenses
-                        .filter { it.type == "income" && it.timestamp in start until end }
-                        .sumOf { it.amount }
+                    // 缓存统计计算，避免每次重组都重新计算
+                    val (periodExpense, periodIncome) = remember(
+                        state.expenses,
+                        state.statsDate,
+                        state.statsPeriod
+                    ) {
+                        val (start, end) = DateUtils.getDateRange(state.statsDate, state.statsPeriod)
+                        val expense = state.expenses
+                            .filter { it.type == "expense" && it.timestamp in start until end }
+                            .sumOf { it.amount }
+                        val income = state.expenses
+                            .filter { it.type == "income" && it.timestamp in start until end }
+                            .sumOf { it.amount }
+                        Pair(expense, income)
+                    }
 
                     StatsScreen(
                         categoryStats = state.categoryStats,
                         dailyStats = state.dailyStats,
+                        incomeCategoryStats = state.incomeCategoryStats,
+                        incomeDailyStats = state.incomeDailyStats,
                         totalExpense = periodExpense,
                         totalIncome = periodIncome,
                         currentPeriod = state.statsPeriod,
@@ -262,6 +272,9 @@ private fun HomeContent(
     isAccessibilityEnabled: Boolean,
     onOpenAccessibility: () -> Unit
 ) {
+    // 搜索类型筛选状态
+    var searchTypeFilter by remember { mutableStateOf<String?>(null) } // null = 全部, "expense", "income"
+
     Column(modifier = Modifier.fillMaxSize()) {
         // Search bar
         AnimatedVisibility(
@@ -269,24 +282,59 @@ private fun HomeContent(
             enter = expandVertically() + fadeIn(),
             exit = shrinkVertically() + fadeOut()
         ) {
-            OutlinedTextField(
-                value = state.searchQuery,
-                onValueChange = onSearch,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                placeholder = { Text("搜索商户、备注、分类...") },
-                leadingIcon = { Icon(Icons.Default.Search, null) },
-                trailingIcon = {
-                    if (state.searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { onSearch("") }) {
-                            Icon(Icons.Default.Close, "清除")
+            Column {
+                OutlinedTextField(
+                    value = state.searchQuery,
+                    onValueChange = onSearch,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    placeholder = { Text("搜索商户、备注、分类...") },
+                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                    trailingIcon = {
+                        if (state.searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { onSearch("") }) {
+                                Icon(Icons.Default.Close, "清除")
+                            }
                         }
-                    }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp)
-            )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                // 类型筛选
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = searchTypeFilter == null,
+                        onClick = { searchTypeFilter = null },
+                        label = { Text("全部") },
+                        leadingIcon = if (searchTypeFilter == null) {
+                            { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
+                        } else null
+                    )
+                    FilterChip(
+                        selected = searchTypeFilter == "expense",
+                        onClick = { searchTypeFilter = "expense" },
+                        label = { Text("支出") },
+                        leadingIcon = if (searchTypeFilter == "expense") {
+                            { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
+                        } else null
+                    )
+                    FilterChip(
+                        selected = searchTypeFilter == "income",
+                        onClick = { searchTypeFilter = "income" },
+                        label = { Text("收入") },
+                        leadingIcon = if (searchTypeFilter == "income") {
+                            { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
+                        } else null
+                    )
+                }
+            }
         }
 
         // 加载状态
@@ -304,8 +352,17 @@ private fun HomeContent(
 
         // Show search results or normal content
         if (state.searchQuery.isNotEmpty()) {
+            // 应用类型筛选
+            val filteredResults = remember(state.searchResults, searchTypeFilter) {
+                if (searchTypeFilter == null) {
+                    state.searchResults
+                } else {
+                    state.searchResults.filter { it.type == searchTypeFilter }
+                }
+            }
+
             SearchResults(
-                results = state.searchResults,
+                results = filteredResults,
                 onExpenseClick = onExpenseClick,
                 onDeleteExpense = onDeleteExpense
             )
@@ -533,7 +590,8 @@ private fun ExpenseList(
             // 日期头部项，使用 date 作为 key，contentType 区分不同类型的项
             item(key = "header_$date", contentType = "header") {
                 val displayDate = DateUtils.formatDisplayDate(date)
-                val dayTotal = dayExpenses.filter { it.type == "expense" }.sumOf { it.amount }
+                val dayExpenseTotal = dayExpenses.filter { it.type == "expense" }.sumOf { it.amount }
+                val dayIncomeTotal = dayExpenses.filter { it.type == "income" }.sumOf { it.amount }
 
                 Row(
                     modifier = Modifier
@@ -547,11 +605,32 @@ private fun ExpenseList(
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Text(
-                        text = "支出 ¥%.2f".format(dayTotal),
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row {
+                        if (dayIncomeTotal > 0) {
+                            Text(
+                                text = "收入 ¥%.2f".format(dayIncomeTotal),
+                                fontSize = 13.sp,
+                                color = ExpenseTheme.colors.income
+                            )
+                            if (dayExpenseTotal > 0) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                        }
+                        if (dayExpenseTotal > 0) {
+                            Text(
+                                text = "支出 ¥%.2f".format(dayExpenseTotal),
+                                fontSize = 13.sp,
+                                color = ExpenseTheme.colors.expense
+                            )
+                        }
+                        if (dayExpenseTotal == 0.0 && dayIncomeTotal == 0.0) {
+                            Text(
+                                text = "无记录",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
 

@@ -1,6 +1,7 @@
 package com.example.localexpense.ui.screens
 
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -25,6 +26,7 @@ import com.example.localexpense.ui.components.BarChart
 import com.example.localexpense.ui.components.PieChart
 import com.example.localexpense.ui.theme.CategoryColorOptions
 import com.example.localexpense.ui.theme.ExpenseTheme
+import com.example.localexpense.util.AmountUtils
 import com.example.localexpense.util.DateUtils
 import java.text.SimpleDateFormat
 import java.util.*
@@ -32,10 +34,15 @@ import java.util.*
 // 使用 DateUtils.StatsPeriod 的类型别名
 typealias StatsPeriod = DateUtils.StatsPeriod
 
+// 统计类型：支出或收入
+enum class StatsType { EXPENSE, INCOME }
+
 @Composable
 fun StatsScreen(
     categoryStats: List<CategoryStat>,
     dailyStats: List<DailyStat>,
+    incomeCategoryStats: List<CategoryStat>,
+    incomeDailyStats: List<DailyStat>,
     totalExpense: Double,
     totalIncome: Double,
     currentPeriod: DateUtils.StatsPeriod,
@@ -43,8 +50,17 @@ fun StatsScreen(
     onPeriodChange: (DateUtils.StatsPeriod) -> Unit,
     onDateChange: (Calendar) -> Unit
 ) {
-    // 使用 Theme 中定义的分类颜色
-    val pieColors = CategoryColorOptions.map { Color(it) }
+    // 当前显示的统计类型（支出/收入）
+    var statsType by remember { mutableStateOf(StatsType.EXPENSE) }
+
+    // 根据当前类型选择数据
+    val currentCategoryStats = if (statsType == StatsType.EXPENSE) categoryStats else incomeCategoryStats
+    val currentDailyStats = if (statsType == StatsType.EXPENSE) dailyStats else incomeDailyStats
+    val currentTotal = if (statsType == StatsType.EXPENSE) totalExpense else totalIncome
+    val currentColor = if (statsType == StatsType.EXPENSE) ExpenseTheme.colors.expense else ExpenseTheme.colors.income
+
+    // 缓存颜色列表，避免每次重组都重新创建
+    val pieColors = remember { CategoryColorOptions.map { Color(it) } }
 
     Column(
         modifier = Modifier
@@ -52,7 +68,7 @@ fun StatsScreen(
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        // Period selector
+        // Period selector (日/周/月)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -134,7 +150,7 @@ fun StatsScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Summary cards
+        // Summary cards (支出和收入总览)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -143,34 +159,56 @@ fun StatsScreen(
                 title = "支出",
                 amount = totalExpense,
                 color = ExpenseTheme.colors.expense,
+                selected = statsType == StatsType.EXPENSE,
+                onClick = { statsType = StatsType.EXPENSE },
                 modifier = Modifier.weight(1f)
             )
             SummaryCard(
                 title = "收入",
                 amount = totalIncome,
                 color = ExpenseTheme.colors.income,
+                selected = statsType == StatsType.INCOME,
+                onClick = { statsType = StatsType.INCOME },
                 modifier = Modifier.weight(1f)
             )
         }
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Pie chart
-        if (categoryStats.isNotEmpty()) {
+        // Pie chart (根据选择显示支出或收入)
+        if (currentCategoryStats.isNotEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "支出分类",
+                        text = if (statsType == StatsType.EXPENSE) "支出分类" else "收入分类",
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     PieChart(
-                        data = categoryStats,
+                        data = currentCategoryStats,
                         colors = pieColors
+                    )
+                }
+            }
+        } else {
+            // 无数据提示
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (statsType == StatsType.EXPENSE) "暂无支出数据" else "暂无收入数据",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -178,22 +216,22 @@ fun StatsScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Bar chart
-        if (dailyStats.isNotEmpty()) {
+        // Bar chart (每日趋势)
+        if (currentDailyStats.isNotEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "每日趋势",
+                        text = if (statsType == StatsType.EXPENSE) "支出趋势" else "收入趋势",
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     BarChart(
-                        data = dailyStats.takeLast(7),
-                        color = ExpenseTheme.colors.expense
+                        data = currentDailyStats.takeLast(7),
+                        color = currentColor
                     )
                 }
             }
@@ -201,8 +239,8 @@ fun StatsScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Category details
-        if (categoryStats.isNotEmpty()) {
+        // Category details (分类明细)
+        if (currentCategoryStats.isNotEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)
@@ -214,7 +252,7 @@ fun StatsScreen(
                         fontSize = 16.sp
                     )
                     Spacer(modifier = Modifier.height(12.dp))
-                    categoryStats.forEachIndexed { index, stat ->
+                    currentCategoryStats.forEachIndexed { index, stat ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -234,13 +272,22 @@ fun StatsScreen(
                                 text = stat.category,
                                 modifier = Modifier.weight(1f)
                             )
+                            // 显示百分比（使用 AmountUtils 进行精确计算）
+                            if (currentTotal > 0) {
+                                Text(
+                                    text = "%.1f%%".format(AmountUtils.percentage(stat.total, currentTotal)),
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                            }
                             Text(
                                 text = "¥%.2f".format(stat.total),
                                 fontWeight = FontWeight.Medium,
-                                color = ExpenseTheme.colors.expense
+                                color = currentColor
                             )
                         }
-                        if (index < categoryStats.lastIndex) {
+                        if (index < currentCategoryStats.lastIndex) {
                             HorizontalDivider(modifier = Modifier.padding(start = 24.dp))
                         }
                     }
@@ -255,12 +302,17 @@ private fun SummaryCard(
     title: String,
     amount: Double,
     color: Color,
+    selected: Boolean,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
-        modifier = modifier,
+        modifier = modifier.clickable(onClick = onClick),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.1f))
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) color.copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceVariant
+        ),
+        border = if (selected) BorderStroke(2.dp, color) else null
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -269,7 +321,7 @@ private fun SummaryCard(
             Text(
                 text = title,
                 fontSize = 14.sp,
-                color = color
+                color = if (selected) color else MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(

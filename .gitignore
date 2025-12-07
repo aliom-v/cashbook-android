@@ -1,20 +1,38 @@
+# Gradle
 *.iml
-.gradle
+.gradle/
+build/
 /local.properties
-/.idea/caches
-/.idea/libraries
+
+# IDE - Android Studio / IntelliJ
+/.idea/caches/
+/.idea/libraries/
 /.idea/modules.xml
 /.idea/workspace.xml
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
+/.idea/deploymentTargetSelector.xml
+/.idea/inspectionProfiles/
+.kotlin/sessions/
 
-# 密钥库文件（不要提交到Git）
+# OS
+.DS_Store
+Thumbs.db
+
+# Android
+/captures
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# 密钥库（敏感文件）
 *.jks
 *.keystore
 keystore.properties
+
+# 其他
+*.log
+*.tmp
+*.bak
+nul
