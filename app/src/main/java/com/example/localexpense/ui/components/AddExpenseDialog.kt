@@ -28,6 +28,7 @@ import com.example.localexpense.data.CategoryEntity
 import com.example.localexpense.data.ExpenseEntity
 import com.example.localexpense.ui.theme.ExpenseTheme
 import com.example.localexpense.ui.util.IconUtil
+import com.example.localexpense.util.Constants
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -177,31 +178,31 @@ fun AddExpenseDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Merchant input (限制长度50字符)
+                // Merchant input (限制长度)
                 OutlinedTextField(
                     value = merchant,
-                    onValueChange = { if (it.length <= 50) merchant = it },
+                    onValueChange = { if (it.length <= Constants.MAX_MERCHANT_NAME_LENGTH) merchant = it },
                     label = { Text("商户/来源") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     shape = RoundedCornerShape(12.dp),
-                    supportingText = if (merchant.length >= 45) {
-                        { Text("${merchant.length}/50") }
+                    supportingText = if (merchant.length >= Constants.MAX_MERCHANT_NAME_LENGTH - 5) {
+                        { Text("${merchant.length}/${Constants.MAX_MERCHANT_NAME_LENGTH}") }
                     } else null
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Note input (限制长度100字符)
+                // Note input (限制长度)
                 OutlinedTextField(
                     value = note,
-                    onValueChange = { if (it.length <= 100) note = it },
+                    onValueChange = { if (it.length <= Constants.MAX_NOTE_LENGTH) note = it },
                     label = { Text("备注") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     shape = RoundedCornerShape(12.dp),
-                    supportingText = if (note.length >= 90) {
-                        { Text("${note.length}/100") }
+                    supportingText = if (note.length >= Constants.MAX_NOTE_LENGTH - 10) {
+                        { Text("${note.length}/${Constants.MAX_NOTE_LENGTH}") }
                     } else null
                 )
 

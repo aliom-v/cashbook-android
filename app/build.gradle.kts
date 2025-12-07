@@ -131,5 +131,8 @@ dependencies {
     // CardView for FloatingWindow
     implementation("androidx.cardview:cardview:1.0.0")
 
+    // Security - Encryption (for rawText encryption)
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

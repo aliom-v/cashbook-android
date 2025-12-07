@@ -57,6 +57,10 @@ interface ExpenseDao {
     // 统计指定时间之前的数据数量
     @Query("SELECT COUNT(*) FROM expense WHERE timestamp < :beforeTimestamp")
     suspend fun countBeforeDate(beforeTimestamp: Long): Int
+
+    // 获取总记录数
+    @Query("SELECT COUNT(*) FROM expense")
+    suspend fun getExpenseCount(): Int
 }
 
 data class CategoryStat(

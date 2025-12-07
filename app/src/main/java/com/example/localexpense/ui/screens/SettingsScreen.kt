@@ -51,14 +51,18 @@ fun SettingsScreen(
     onSaveBudget: (Double) -> Unit,
     onAddCategory: (CategoryEntity) -> Unit,
     onDeleteCategory: (CategoryEntity) -> Unit,
-    onOpenAccessibility: () -> Unit
+    onOpenAccessibility: () -> Unit,
+    onImportData: ((Uri) -> Unit)? = null,
+    onClearAllData: (() -> Unit)? = null
 ) {
     var showBudgetDialog by remember { mutableStateOf(false) }
     var showCategoryDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
     var showRestoreDialog by remember { mutableStateOf(false) }
     var showCleanupDialog by remember { mutableStateOf(false) }
+    var showClearAllDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -136,6 +140,15 @@ fun SettingsScreen(
                     onClick = { showExportDialog = true }
                 )
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                if (onImportData != null) {
+                    SettingsItem(
+                        icon = Icons.Default.FileUpload,
+                        title = "导入数据",
+                        subtitle = "从 CSV/JSON 文件导入",
+                        onClick = { showImportDialog = true }
+                    )
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                }
                 SettingsItem(
                     icon = Icons.Default.Backup,
                     title = "备份数据",
@@ -156,6 +169,15 @@ fun SettingsScreen(
                     subtitle = "删除指定时间前的账单",
                     onClick = { showCleanupDialog = true }
                 )
+                if (onClearAllData != null) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    SettingsItem(
+                        icon = Icons.Default.DeleteForever,
+                        title = "清除所有数据",
+                        subtitle = "删除全部账单记录",
+                        onClick = { showClearAllDialog = true }
+                    )
+                }
             }
         }
 
@@ -433,6 +455,28 @@ fun SettingsScreen(
             context = context,
             scope = scope,
             onDismiss = { showCleanupDialog = false }
+        )
+    }
+
+    // Import dialog
+    if (showImportDialog && onImportData != null) {
+        com.example.localexpense.ui.components.ImportDialog(
+            onDismiss = { showImportDialog = false },
+            onImport = { uri ->
+                onImportData(uri)
+            }
+        )
+    }
+
+    // Clear all data dialog
+    if (showClearAllDialog && onClearAllData != null) {
+        com.example.localexpense.ui.components.ConfirmDialog(
+            title = "清除所有数据",
+            message = "确定要删除所有账单记录吗？此操作不可恢复！\n\n建议先备份数据再执行此操作。",
+            confirmText = "确认删除",
+            isDestructive = true,
+            onConfirm = onClearAllData,
+            onDismiss = { showClearAllDialog = false }
         )
     }
 }

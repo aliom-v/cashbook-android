@@ -1,19 +1,57 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+ (API 31+) 数据提取规则
+
+    本地记账应用备份策略：
+    - cloud-backup: 云备份（Google Drive）
+    - device-transfer: 设备间传输（换机）
+
+    安全考虑：
+    1. 数据库包含用户财务数据，允许备份以防数据丢失
+    2. 加密密钥不备份，恢复后自动重新生成
+    3. rawText 字段已加密，备份安全
 -->
 <data-extraction-rules>
+    <!-- 云备份规则 -->
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <!-- 包含数据库 -->
+        <include domain="database" path="local_expense.db" />
+        <include domain="database" path="local_expense.db-wal" />
+        <include domain="database" path="local_expense.db-shm" />
+
+        <!-- 包含用户设置（降级存储） -->
+        <include domain="sharedpref" path="local_expense_secure_prefs_fallback.xml" />
+
+        <!-- 包含规则配置 -->
+        <include domain="file" path="transaction_rules.json" />
+
+        <!-- 排除加密存储（密钥无法跨设备恢复） -->
+        <exclude domain="sharedpref" path="local_expense_secure_prefs.xml" />
+        <exclude domain="sharedpref" path="androidx.security.crypto.encrypted_prefs.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+
+        <!-- 排除缓存和临时文件 -->
+        <exclude domain="cache" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="file" path="no_backup/" />
     </cloud-backup>
-    <!--
+
+    <!-- 设备传输规则（换机场景） -->
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <!-- 包含所有用户数据 -->
+        <include domain="database" path="local_expense.db" />
+        <include domain="database" path="local_expense.db-wal" />
+        <include domain="database" path="local_expense.db-shm" />
+        <include domain="sharedpref" path="local_expense_secure_prefs_fallback.xml" />
+        <include domain="file" path="transaction_rules.json" />
+
+        <!-- 排除加密存储 -->
+        <exclude domain="sharedpref" path="local_expense_secure_prefs.xml" />
+        <exclude domain="sharedpref" path="androidx.security.crypto.encrypted_prefs.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+
+        <!-- 排除缓存 -->
+        <exclude domain="cache" path="." />
+        <exclude domain="external" path="." />
     </device-transfer>
-    -->
 </data-extraction-rules>

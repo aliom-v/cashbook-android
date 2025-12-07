@@ -1,11 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    无障碍服务配置文件
+
+    配置说明：
+    - accessibilityEventTypes: 监听的事件类型
+      - typeWindowStateChanged: 窗口状态变化（切换页面）
+      - typeWindowContentChanged: 窗口内容变化（页面内容更新）
+      - typeNotificationStateChanged: 通知状态变化（用于检测通知栏消息）
+
+    - accessibilityFlags:
+      - flagDefault: 默认行为
+      - flagIncludeNotImportantViews: 包含所有视图（包括不重要的）
+      - flagReportViewIds: 报告视图ID（用于精确定位元素）
+      - flagRequestFilterKeyEvents: 过滤按键事件（不需要）
+
+    - packageNames: 仅监听指定应用，减少性能开销
+
+    - notificationTimeout: 事件节流时间（毫秒）
+      设置为200ms，平衡响应速度和性能
+-->
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeNotificationStateChanged"
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:notificationTimeout="100"
+    android:notificationTimeout="200"
     android:canRetrieveWindowContent="true"
     android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone,com.unionpay"
     android:settingsActivity="com.example.localexpense.ui.MainActivity"
-    android:description="@string/accessibility_desc" />
+    android:description="@string/accessibility_service_description" />

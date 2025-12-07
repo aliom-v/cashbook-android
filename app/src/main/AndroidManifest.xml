@@ -6,8 +6,9 @@
     <!-- 通知权限 (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- 前台服务权限 (预留) -->
+    <!-- 前台服务权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- 开机启动权限 (预留) -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -15,10 +16,14 @@
     <!-- 悬浮窗权限 (用于显示记账确认窗口) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
-    <!-- 查询所有应用包名权限 (Android 11+)
-         用于无障碍服务监听指定App(微信、支付宝)的事件 -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
+    <!-- 声明需要查询的特定应用包名 (Android 11+)
+         无障碍服务监听其他应用不需要QUERY_ALL_PACKAGES权限
+         仅在需要主动查询其他应用信息时才需要声明 -->
+    <queries>
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.unionpay" />
+    </queries>
 
     <application
         android:name=".LocalExpenseApp"
@@ -42,13 +47,19 @@
         <service
             android:name=".accessibility.ExpenseAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-            android:exported="false">
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            tools:targetApi="34">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/expense_accessibility_config" />
+            <!-- Android 14+ 需要声明 specialUse 的用途 -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="accessibility_monitoring" />
         </service>
 
         <provider

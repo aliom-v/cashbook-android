@@ -19,25 +19,56 @@ object Constants {
     const val SEARCH_DEBOUNCE_MS = 300L
 
     // 金额最大值（单笔交易上限，用于过滤异常值）
-    // 日常消费很少超过1万，设置为10000可以过滤大部分误识别
-    const val MAX_AMOUNT = 10000.0
+    // 提高到5万以支持大额转账和消费场景
+    const val MAX_AMOUNT = 50000.0
 
     // 商户名称最大长度（与RuleEngine保持一致）
     const val MAX_MERCHANT_NAME_LENGTH = 50
 
+    // 备注最大长度
+    const val MAX_NOTE_LENGTH = 100
+
+    // 分类名称最大长度
+    const val MAX_CATEGORY_NAME_LENGTH = 20
+
+    // 搜索关键词最大长度
+    const val MAX_SEARCH_QUERY_LENGTH = 50
+
+    // 单个文本最大长度（用于过滤无效文本）
+    const val MAX_SINGLE_TEXT_LENGTH = 500
+
     // 通知ID取模范围
     const val NOTIFICATION_ID_MOD = 10000
+
+    // ========== 无障碍服务相关常量 ==========
+
+    // OCR 冷却时间（毫秒）
+    const val OCR_COOLDOWN_MS = 2000L
+
+    // 节点树遍历最大深度
+    const val MAX_NODE_COLLECT_DEPTH = 25
+
+    // 单个节点最大子节点数量
+    const val MAX_CHILD_NODE_COUNT = 100
+
+    // 最大收集文本数量
+    const val MAX_COLLECTED_TEXT_COUNT = 300
+
+    // 监控时间容差（毫秒）
+    const val MONITOR_TIME_TOLERANCE_MS = 500L
 
     // 数据库名称
     const val DATABASE_NAME = "local_expense.db"
 
     // 需要过滤的特殊号码（运营商客服、银行等）
+    // 注意：只过滤明显不可能是消费金额的数字
+    // 移除了 400.0、800.0、110.0、120.0 等可能是真实消费的金额
     val BLACKLIST_AMOUNTS = setOf(
-        // 运营商
+        // 运营商客服号码（5位数，不可能是消费金额）
         10086.0,  // 中国移动
         10010.0,  // 中国联通
         10000.0,  // 中国电信
-        // 银行客服
+        // 银行客服号码（5位数，不可能是消费金额）
         95588.0,  // 工商银行
         95533.0,  // 建设银行
         95566.0,  // 中国银行
@@ -55,21 +86,11 @@ object Constants {
         95526.0,  // 华夏银行
         95577.0,  // 华夏银行（新）
         95580.0,  // 邮储银行
-        // 客服热线
-        400.0,    // 400开头的客服
-        800.0,    // 800开头的客服
-        // 紧急服务
-        110.0,    // 报警
-        120.0,    // 急救
-        119.0,    // 火警
-        122.0,    // 交通事故
-        // 公共服务
+        // 公共服务号码（5位数）
         12315.0,  // 消费者投诉
         12306.0,  // 铁路客服
         12345.0,  // 政务服务
-        114.0,    // 查号台
-        // 常见误识别
-        1234.0,   // 可能是验证码
+        // 常见误识别（6位数密码提示）
         123456.0  // 可能是密码提示
     )
 }
@@ -94,10 +115,23 @@ object Channel {
 
     // 包名映射
     val PACKAGE_MAP = mapOf(
-        "com.tencent.mm" to WECHAT,
-        "com.eg.android.AlipayGphone" to ALIPAY,
-        "com.unionpay" to UNIONPAY
+        PackageNames.WECHAT to WECHAT,
+        PackageNames.ALIPAY to ALIPAY,
+        PackageNames.UNIONPAY to UNIONPAY
     )
+}
+
+/**
+ * 监控的应用包名
+ * 集中管理所有硬编码的包名，方便维护
+ */
+object PackageNames {
+    const val WECHAT = "com.tencent.mm"
+    const val ALIPAY = "com.eg.android.AlipayGphone"
+    const val UNIONPAY = "com.unionpay"
+
+    // 所有监控的包名集合
+    val MONITORED_PACKAGES = setOf(WECHAT, ALIPAY, UNIONPAY)
 }
 
 /**

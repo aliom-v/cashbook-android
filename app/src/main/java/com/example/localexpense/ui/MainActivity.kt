@@ -15,7 +15,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        
+
         setContent {
             val vm: MainViewModel = viewModel(
                 factory = MainViewModel.factory(applicationContext)
@@ -25,20 +25,22 @@ class MainActivity : ComponentActivity() {
             LocalExpenseTheme {
                 MainScreen(
                     state = state,
-                    onAddExpense = { vm.addExpense(it) },
-                    onDeleteExpense = { vm.deleteExpense(it) },
-                    onSearch = { vm.search(it) },
-                    onSelectCalendarDate = { vm.selectCalendarDate(it) },
-                    onCalendarMonthChange = { vm.setCalendarMonth(it) },
-                    onStatsPeriodChange = { vm.setStatsPeriod(it) },
-                    onStatsDateChange = { vm.setStatsDate(it) },
-                    onSaveBudget = { vm.saveBudget(it) },
-                    onAddCategory = { vm.addCategory(it) },
-                    onDeleteCategory = { vm.deleteCategory(it) },
+                    onAddExpense = { vm.handleIntent(UserIntent.AddExpense(it)) },
+                    onDeleteExpense = { vm.handleIntent(UserIntent.DeleteExpense(it)) },
+                    onSearch = { vm.handleIntent(UserIntent.Search(it)) },
+                    onSelectCalendarDate = { vm.handleIntent(UserIntent.SelectCalendarDate(it)) },
+                    onCalendarMonthChange = { vm.handleIntent(UserIntent.SetCalendarMonth(it.timeInMillis)) },
+                    onStatsPeriodChange = { vm.handleIntent(UserIntent.SetStatsPeriod(it)) },
+                    onStatsDateChange = { vm.handleIntent(UserIntent.SetStatsDate(it.timeInMillis)) },
+                    onSaveBudget = { vm.handleIntent(UserIntent.SaveBudget(it)) },
+                    onAddCategory = { vm.handleIntent(UserIntent.AddCategory(it)) },
+                    onDeleteCategory = { vm.handleIntent(UserIntent.DeleteCategory(it)) },
                     onOpenAccessibility = {
                         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
-                    onClearError = { vm.clearError() }
+                    onImportData = { uri -> vm.handleIntent(UserIntent.ImportData(uri)) },
+                    onClearAllData = { vm.handleIntent(UserIntent.ClearAllData) },
+                    onClearError = { vm.handleIntent(UserIntent.ClearError) }
                 )
             }
         }

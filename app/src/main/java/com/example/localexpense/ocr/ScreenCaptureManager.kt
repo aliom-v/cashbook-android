@@ -11,6 +11,7 @@ import android.view.Display
 import androidx.annotation.RequiresApi
 import com.example.localexpense.BuildConfig
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -229,12 +230,28 @@ class ScreenCaptureManager(private val service: AccessibilityService) {
      */
     fun release() {
         try {
-            executor.shutdown()
+            // 取消所有 pending 的超时任务
+            cancelTimeout()
+            // 移除所有 Handler 回调，防止泄漏
+            mainHandler.removeCallbacksAndMessages(null)
+            // 重置截图状态
+            isCapturing.set(false)
+            // 立即关闭线程池，中断所有任务
+            executor.shutdownNow()
+            // 等待最多1秒让任务结束
+            if (!executor.awaitTermination(1, TimeUnit.SECONDS)) {
+                if (BuildConfig.DEBUG) {
+                    Log.w(TAG, "执行器未能在1秒内关闭")
+                }
+            }
             if (BuildConfig.DEBUG) {
                 Log.d(TAG, "截图管理器已释放")
             }
         } catch (e: Exception) {
             // 忽略释放异常
+            if (BuildConfig.DEBUG) {
+                Log.e(TAG, "释放截图管理器异常: ${e.message}")
+            }
         }
     }
 

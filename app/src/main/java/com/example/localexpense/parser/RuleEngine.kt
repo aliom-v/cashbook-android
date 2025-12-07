@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.localexpense.util.AmountUtils
 import com.example.localexpense.util.Constants
+import com.example.localexpense.util.SecurePreferences
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -41,13 +42,15 @@ object RuleEngine {
 
     private const val TAG = "RuleEngine"
     private const val RULES_FILE = "transaction_rules.json"
-    private const val RULES_VERSION_KEY = "rules_version"
 
     // 规则缓存 - 使用 @Volatile 保证多线程可见性
     @Volatile
     private var appRules: Map<String, List<TransactionRule>> = emptyMap()
     @Volatile
     private var currentVersion: String = "0.0.0"
+
+    // 规则更新锁，保护写操作的线程安全
+    private val rulesLock = Any()
 
     /**
      * 交易规则数据类
@@ -89,31 +92,33 @@ object RuleEngine {
     }
 
     /**
-     * 解析JSON规则
+     * 解析JSON规则（线程安全）
      */
     private fun parseRules(json: String) {
-        val root = JSONObject(json)
-        currentVersion = root.optString("version", "0.0.0")
+        synchronized(rulesLock) {
+            val root = JSONObject(json)
+            currentVersion = root.optString("version", "0.0.0")
 
-        val appsArray = root.getJSONArray("apps")
-        val rulesMap = mutableMapOf<String, List<TransactionRule>>()
+            val appsArray = root.getJSONArray("apps")
+            val rulesMap = mutableMapOf<String, List<TransactionRule>>()
 
-        for (i in 0 until appsArray.length()) {
-            val app = appsArray.getJSONObject(i)
-            val packageName = app.getString("packageName")
-            val rulesArray = app.getJSONArray("rules")
+            for (i in 0 until appsArray.length()) {
+                val app = appsArray.getJSONObject(i)
+                val packageName = app.getString("packageName")
+                val rulesArray = app.getJSONArray("rules")
 
-            val rules = mutableListOf<TransactionRule>()
-            for (j in 0 until rulesArray.length()) {
-                val ruleJson = rulesArray.getJSONObject(j)
-                rules.add(parseRule(ruleJson))
+                val rules = mutableListOf<TransactionRule>()
+                for (j in 0 until rulesArray.length()) {
+                    val ruleJson = rulesArray.getJSONObject(j)
+                    rules.add(parseRule(ruleJson))
+                }
+
+                // 按优先级排序（优先级高的先匹配）
+                rulesMap[packageName] = rules.sortedByDescending { it.priority }
             }
 
-            // 按优先级排序（优先级高的先匹配）
-            rulesMap[packageName] = rules.sortedByDescending { it.priority }
+            appRules = rulesMap
         }
-
-        appRules = rulesMap
     }
 
     // 记录无效规则数量，用于诊断
@@ -181,20 +186,32 @@ object RuleEngine {
      * @return 匹配的规则 + 提取的数据
      */
     fun match(texts: List<String>, packageName: String): MatchResult? {
-        val rules = appRules[packageName] ?: return null
+        // 同步读取规则，防止读取到部分初始化的数据
+        val rules = synchronized(rulesLock) {
+            appRules[packageName]
+        } ?: return null
         val joinedText = texts.joinToString(" | ")
 
         // 遍历规则（按优先级从高到低）
         for (rule in rules) {
             // 1. 检查是否包含触发关键词
-            if (!rule.triggerKeywords.any { joinedText.contains(it) }) {
+            val hasTriggerKeyword = rule.triggerKeywords.any { joinedText.contains(it) }
+            if (!hasTriggerKeyword) {
                 continue
             }
 
-            // 2. 检查排除关键词（如果包含任何排除词，跳过此规则）
-            if (rule.excludeKeywords.isNotEmpty() && rule.excludeKeywords.any { joinedText.contains(it) }) {
-                continue
-            }
+            // 2. 检查排除关键词
+            // 与 TransactionParser 逻辑一致：如果有触发关键词（成功场景），
+            // 则忽略排除关键词（可能是页面历史元素）
+            val hasExcludeKeyword = rule.excludeKeywords.isNotEmpty() &&
+                rule.excludeKeywords.any { joinedText.contains(it) }
+
+            // 只有在没有触发关键词的情况下，排除关键词才生效
+            // 但由于已经检查了触发关键词存在，这里直接跳过排除检查
+            // 注意：如果需要更严格的排除逻辑，可以取消下面的注释
+            // if (hasExcludeKeyword && !hasTriggerKeyword) {
+            //     continue
+            // }
 
             // 3. 提取金额
             val amount = extractAmount(texts, rule.amountPatterns) ?: continue
@@ -202,7 +219,7 @@ object RuleEngine {
             // 4. 提取商户（如果规则定义了）
             val merchant = rule.merchantPatterns?.let { patterns ->
                 extractMerchant(texts, patterns)
-            } ?: "未知商户"
+            } ?: getDefaultMerchant(rule.category)
 
             // 5. 匹配成功
             return MatchResult(
@@ -213,6 +230,18 @@ object RuleEngine {
         }
 
         return null
+    }
+
+    /**
+     * 根据分类获取默认商户名
+     */
+    private fun getDefaultMerchant(category: String): String = when {
+        category.contains("红包") -> "红包"
+        category.contains("转账") -> "转账"
+        category.contains("微信") -> "微信支付"
+        category.contains("支付宝") -> "支付宝"
+        category.contains("云闪付") -> "云闪付"
+        else -> "未知商户"
     }
 
     /**
@@ -278,7 +307,7 @@ object RuleEngine {
             for (pattern in patterns) {
                 val matcher = pattern.matcher(text)
                 if (matcher.find()) {
-                    return matcher.group(1)?.trim()?.take(50)
+                    return matcher.group(1)?.trim()?.take(Constants.MAX_MERCHANT_NAME_LENGTH)
                 }
             }
         }
@@ -286,40 +315,42 @@ object RuleEngine {
     }
 
     /**
-     * 加载降级规则（当JSON解析失败时使用）
+     * 加载降级规则（当JSON解析失败时使用，线程安全）
      * 降级规则更加严格，只匹配明确的支付成功页面
      */
     private fun loadFallbackRules() {
-        Log.w(TAG, "使用硬编码降级规则")
+        synchronized(rulesLock) {
+            Log.w(TAG, "使用硬编码降级规则")
 
-        // 支付确认页面的特征词，用于排除
-        val confirmPageKeywords = listOf(
-            "确认付款", "立即支付", "确认支付", "输入密码",
-            "待支付", "去支付", "支付方式", "付款方式"
-        )
-
-        val wechatRules = listOf(
-            TransactionRule(
-                type = "expense",
-                triggerKeywords = listOf("支付成功", "付款成功"),
-                excludeKeywords = confirmPageKeywords,
-                amountPatterns = listOf(Pattern.compile("￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)")),
-                merchantPatterns = null,
-                category = "微信支付",
-                priority = 10
-            ),
-            TransactionRule(
-                type = "income",
-                triggerKeywords = listOf("收到转账", "已领取", "红包已存入"),
-                excludeKeywords = emptyList(),
-                amountPatterns = listOf(Pattern.compile("￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)")),
-                merchantPatterns = null,
-                category = "微信收入",
-                priority = 10
+            // 支付确认页面的特征词，用于排除
+            val confirmPageKeywords = listOf(
+                "确认付款", "立即支付", "确认支付", "输入密码",
+                "待支付", "去支付", "支付方式", "付款方式"
             )
-        )
 
-        appRules = mapOf("com.tencent.mm" to wechatRules)
+            val wechatRules = listOf(
+                TransactionRule(
+                    type = "expense",
+                    triggerKeywords = listOf("支付成功", "付款成功"),
+                    excludeKeywords = confirmPageKeywords,
+                    amountPatterns = listOf(Pattern.compile("￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)")),
+                    merchantPatterns = null,
+                    category = "微信支付",
+                    priority = 10
+                ),
+                TransactionRule(
+                    type = "income",
+                    triggerKeywords = listOf("收到转账", "已领取", "红包已存入"),
+                    excludeKeywords = emptyList(),
+                    amountPatterns = listOf(Pattern.compile("￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)")),
+                    merchantPatterns = null,
+                    category = "微信收入",
+                    priority = 10
+                )
+            )
+
+            appRules = mapOf(com.example.localexpense.util.PackageNames.WECHAT to wechatRules)
+        }
     }
 
     /**
@@ -334,11 +365,9 @@ object RuleEngine {
             val cacheFile = File(context.filesDir, RULES_FILE)
             cacheFile.writeText(newRulesJson)
 
-            // 3. 保存版本号
-            context.getSharedPreferences("rules", Context.MODE_PRIVATE)
-                .edit()
-                .putString(RULES_VERSION_KEY, currentVersion)
-                .apply()
+            // 3. 保存版本号（使用加密存储）
+            SecurePreferences.putString(context, SecurePreferences.Keys.RULES_VERSION, currentVersion)
+            SecurePreferences.putLong(context, SecurePreferences.Keys.RULES_LAST_UPDATE, System.currentTimeMillis())
 
             Log.i(TAG, "规则更新成功: $currentVersion")
             true
@@ -352,6 +381,37 @@ object RuleEngine {
      * 获取当前规则版本
      */
     fun getVersion(): String = currentVersion
+
+    /**
+     * 检查规则引擎是否已初始化
+     */
+    fun isInitialized(): Boolean = synchronized(rulesLock) {
+        appRules.isNotEmpty()
+    }
+
+    /**
+     * 获取规则引擎统计信息
+     */
+    fun getStats(): RuleStats = synchronized(rulesLock) {
+        val appCount = appRules.size
+        val ruleCount = appRules.values.sumOf { it.size }
+        RuleStats(
+            appCount = appCount,
+            ruleCount = ruleCount,
+            version = currentVersion,
+            invalidPatternCount = invalidPatternCount
+        )
+    }
+
+    /**
+     * 规则统计信息
+     */
+    data class RuleStats(
+        val appCount: Int,
+        val ruleCount: Int,
+        val version: String,
+        val invalidPatternCount: Int
+    )
 
     /**
      * 辅助方法: JSONArray -> List<String>

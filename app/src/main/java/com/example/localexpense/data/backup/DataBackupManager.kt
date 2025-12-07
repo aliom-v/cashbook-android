@@ -2,6 +2,7 @@ package com.example.localexpense.data.backup
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
 import com.example.localexpense.data.BudgetEntity
 import com.example.localexpense.data.CategoryEntity
 import com.example.localexpense.data.ExpenseEntity
@@ -12,9 +13,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * 备份数据结构
@@ -43,6 +50,16 @@ class DataBackupManager(
     companion object {
         // 最大备份文件大小：10MB
         private const val MAX_BACKUP_SIZE = 10 * 1024 * 1024L
+
+        // 加密相关常量
+        private const val ENCRYPTION_ALGORITHM = "AES/GCM/NoPadding"
+        private const val KEY_DERIVATION_ALGORITHM = "PBKDF2WithHmacSHA256"
+        private const val KEY_SIZE = 256
+        private const val GCM_IV_LENGTH = 12
+        private const val GCM_TAG_LENGTH = 128
+        private const val PBKDF2_ITERATIONS = 100000
+        private const val SALT_LENGTH = 16
+        private const val ENCRYPTED_PREFIX = "ENCRYPTED:"
     }
 
     /**
@@ -208,9 +225,199 @@ class DataBackupManager(
     /**
      * 生成备份文件名
      */
-    fun generateBackupFileName(): String {
+    fun generateBackupFileName(encrypted: Boolean = false): String {
         val dateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-        return "localexpense_backup_${dateFormat.format(Date())}.json"
+        val suffix = if (encrypted) ".enc.json" else ".json"
+        return "localexpense_backup_${dateFormat.format(Date())}$suffix"
+    }
+
+    // ========== 加密导出/导入 ==========
+
+    /**
+     * 导出加密的数据到 JSON 字符串
+     *
+     * @param password 用户设置的密码
+     * @return 加密后的备份字符串
+     */
+    suspend fun exportToEncryptedJson(password: String): Result<String> = withContext(Dispatchers.IO) {
+        Result.suspendRunCatching {
+            if (password.length < 4) {
+                throw IllegalArgumentException("密码长度至少需要4位")
+            }
+
+            Logger.d(tag) { "开始导出加密数据..." }
+
+            // 1. 先获取普通 JSON
+            val jsonResult = exportToJson()
+            val json = when (jsonResult) {
+                is Result.Success -> jsonResult.data
+                is Result.Error -> throw jsonResult.exception
+                is Result.Loading -> throw IllegalStateException("未预期的状态")
+            }
+
+            // 2. 加密 JSON
+            val encryptedData = encryptWithPassword(json, password)
+
+            Logger.d(tag) { "加密导出完成" }
+
+            ENCRYPTED_PREFIX + encryptedData
+        }
+    }
+
+    /**
+     * 导出加密数据到 Uri（文件）
+     */
+    suspend fun exportToEncryptedUri(uri: Uri, password: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val encryptedResult = exportToEncryptedJson(password)
+        when (encryptedResult) {
+            is Result.Success -> {
+                Result.suspendRunCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { output ->
+                        output.write(encryptedResult.data.toByteArray(Charsets.UTF_8))
+                    } ?: throw IllegalStateException("无法打开输出流")
+                }
+            }
+            is Result.Error -> encryptedResult
+            is Result.Loading -> Result.Error(IllegalStateException("未预期的状态"))
+        }
+    }
+
+    /**
+     * 从加密的 JSON 字符串导入数据
+     *
+     * @param encryptedJson 加密的备份字符串
+     * @param password 解密密码
+     * @param merge 是否合并（否则清空现有数据）
+     */
+    suspend fun importFromEncryptedJson(
+        encryptedJson: String,
+        password: String,
+        merge: Boolean = false
+    ): Result<ImportResult> = withContext(Dispatchers.IO) {
+        Result.suspendRunCatching {
+            if (!encryptedJson.startsWith(ENCRYPTED_PREFIX)) {
+                throw IllegalArgumentException("这不是加密的备份文件")
+            }
+
+            Logger.d(tag) { "开始解密导入数据..." }
+
+            // 1. 解密
+            val encryptedData = encryptedJson.removePrefix(ENCRYPTED_PREFIX)
+            val json = try {
+                decryptWithPassword(encryptedData, password)
+            } catch (e: Exception) {
+                throw IllegalArgumentException("解密失败，请检查密码是否正确", e)
+            }
+
+            // 2. 导入解密后的数据
+            when (val result = importFromJson(json, merge)) {
+                is Result.Success -> result.data
+                is Result.Error -> throw result.exception
+                is Result.Loading -> throw IllegalStateException("未预期的状态")
+            }
+        }
+    }
+
+    /**
+     * 从加密的 Uri（文件）导入数据
+     */
+    suspend fun importFromEncryptedUri(
+        uri: Uri,
+        password: String,
+        merge: Boolean = false
+    ): Result<ImportResult> = withContext(Dispatchers.IO) {
+        Result.suspendRunCatching {
+            val fileSize = context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+            if (fileSize > MAX_BACKUP_SIZE) {
+                throw IllegalArgumentException("备份文件过大")
+            }
+
+            val encryptedJson = context.contentResolver.openInputStream(uri)?.use { input ->
+                input.bufferedReader().readText()
+            } ?: throw IllegalStateException("无法读取文件")
+
+            when (val result = importFromEncryptedJson(encryptedJson, password, merge)) {
+                is Result.Success -> result.data
+                is Result.Error -> throw result.exception
+                is Result.Loading -> throw IllegalStateException("未预期的状态")
+            }
+        }
+    }
+
+    /**
+     * 检查备份文件是否已加密
+     */
+    fun isEncryptedBackup(content: String): Boolean {
+        return content.startsWith(ENCRYPTED_PREFIX)
+    }
+
+    // ========== 加密辅助方法 ==========
+
+    /**
+     * 使用密码加密数据
+     * 使用 PBKDF2 派生密钥，AES-GCM 加密
+     */
+    private fun encryptWithPassword(plainText: String, password: String): String {
+        val secureRandom = SecureRandom()
+
+        // 生成盐值
+        val salt = ByteArray(SALT_LENGTH)
+        secureRandom.nextBytes(salt)
+
+        // 生成 IV
+        val iv = ByteArray(GCM_IV_LENGTH)
+        secureRandom.nextBytes(iv)
+
+        // 从密码派生密钥
+        val secretKey = deriveKeyFromPassword(password, salt)
+
+        // 加密
+        val cipher = Cipher.getInstance(ENCRYPTION_ALGORITHM)
+        val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, gcmSpec)
+
+        val encryptedBytes = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
+
+        // 组合：salt + iv + encrypted
+        val combined = ByteArray(salt.size + iv.size + encryptedBytes.size)
+        System.arraycopy(salt, 0, combined, 0, salt.size)
+        System.arraycopy(iv, 0, combined, salt.size, iv.size)
+        System.arraycopy(encryptedBytes, 0, combined, salt.size + iv.size, encryptedBytes.size)
+
+        return Base64.encodeToString(combined, Base64.NO_WRAP)
+    }
+
+    /**
+     * 使用密码解密数据
+     */
+    private fun decryptWithPassword(encryptedData: String, password: String): String {
+        val combined = Base64.decode(encryptedData, Base64.NO_WRAP)
+
+        // 分离：salt + iv + encrypted
+        val salt = combined.copyOfRange(0, SALT_LENGTH)
+        val iv = combined.copyOfRange(SALT_LENGTH, SALT_LENGTH + GCM_IV_LENGTH)
+        val encryptedBytes = combined.copyOfRange(SALT_LENGTH + GCM_IV_LENGTH, combined.size)
+
+        // 从密码派生密钥
+        val secretKey = deriveKeyFromPassword(password, salt)
+
+        // 解密
+        val cipher = Cipher.getInstance(ENCRYPTION_ALGORITHM)
+        val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, gcmSpec)
+
+        val decryptedBytes = cipher.doFinal(encryptedBytes)
+        return String(decryptedBytes, Charsets.UTF_8)
+    }
+
+    /**
+     * 从密码派生 AES 密钥（PBKDF2）
+     */
+    private fun deriveKeyFromPassword(password: String, salt: ByteArray): SecretKeySpec {
+        val factory = SecretKeyFactory.getInstance(KEY_DERIVATION_ALGORITHM)
+        val spec = PBEKeySpec(password.toCharArray(), salt, PBKDF2_ITERATIONS, KEY_SIZE)
+        val secretKey = factory.generateSecret(spec)
+        return SecretKeySpec(secretKey.encoded, "AES")
     }
 
     // ========== JSON 序列化 ==========

@@ -50,6 +50,8 @@ fun MainScreen(
     onAddCategory: (com.example.localexpense.data.CategoryEntity) -> Unit,
     onDeleteCategory: (com.example.localexpense.data.CategoryEntity) -> Unit,
     onOpenAccessibility: () -> Unit,
+    onImportData: ((android.net.Uri) -> Unit)? = null,
+    onClearAllData: (() -> Unit)? = null,
     onClearError: () -> Unit = {}
 ) {
     var currentScreen by remember { mutableStateOf(Screen.HOME) }
@@ -191,20 +193,13 @@ fun MainScreen(
                     )
                 }
                 Screen.STATS -> {
-                    // 缓存统计计算，避免每次重组都重新计算
-                    val (periodExpense, periodIncome) = remember(
-                        state.expenses,
-                        state.statsDate,
-                        state.statsPeriod
-                    ) {
-                        val (start, end) = DateUtils.getDateRange(state.statsDate, state.statsPeriod)
-                        val expense = state.expenses
-                            .filter { it.type == "expense" && it.timestamp in start until end }
-                            .sumOf { it.amount }
-                        val income = state.expenses
-                            .filter { it.type == "income" && it.timestamp in start until end }
-                            .sumOf { it.amount }
-                        Pair(expense, income)
+                    // 直接使用 ViewModel 中预计算的 categoryStats 合计值
+                    // 避免在 UI 层重复遍历整个 expenses 列表
+                    val periodExpense = remember(state.categoryStats) {
+                        state.categoryStats.sumOf { it.total }
+                    }
+                    val periodIncome = remember(state.incomeCategoryStats) {
+                        state.incomeCategoryStats.sumOf { it.total }
                     }
 
                     StatsScreen(
@@ -215,7 +210,7 @@ fun MainScreen(
                         totalExpense = periodExpense,
                         totalIncome = periodIncome,
                         currentPeriod = state.statsPeriod,
-                        currentDate = state.statsDate,
+                        currentDate = Calendar.getInstance().apply { timeInMillis = state.statsDate },
                         onPeriodChange = onStatsPeriodChange,
                         onDateChange = onStatsDateChange
                     )
@@ -224,7 +219,7 @@ fun MainScreen(
                     CalendarScreen(
                         expenses = state.expenses,
                         selectedDate = state.selectedCalendarDate,
-                        currentMonth = state.calendarMonth,
+                        currentMonth = Calendar.getInstance().apply { timeInMillis = state.calendarMonth },
                         onDateSelect = onSelectCalendarDate,
                         onMonthChange = onCalendarMonthChange,
                         onExpenseClick = { expense ->
@@ -241,7 +236,9 @@ fun MainScreen(
                         onSaveBudget = onSaveBudget,
                         onAddCategory = onAddCategory,
                         onDeleteCategory = onDeleteCategory,
-                        onOpenAccessibility = onOpenAccessibility
+                        onOpenAccessibility = onOpenAccessibility,
+                        onImportData = onImportData,
+                        onClearAllData = onClearAllData
                     )
                 }
             }

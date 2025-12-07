@@ -85,8 +85,8 @@ object MonitorSettings {
     fun isAfterMonitorStart(context: Context, transactionTime: Long): Boolean {
         if (!isMonitorEnabled(context)) return false
         val startTime = getMonitorStartTime(context)
-        // 允许500ms的系统时钟误差（降低误接受启动前交易的风险）
-        return transactionTime >= (startTime - 500)
+        // 允许一定时间的系统时钟误差（降低误接受启动前交易的风险）
+        return transactionTime >= (startTime - Constants.MONITOR_TIME_TOLERANCE_MS)
     }
 
     /**

@@ -8,11 +8,10 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.localexpense.util.Constants
-import java.util.concurrent.Executors
 
 @Database(
     entities = [ExpenseEntity::class, CategoryEntity::class, BudgetEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false  // 禁用 schema 导出，避免构建警告
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -66,6 +65,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * 数据库迁移：版本 3 -> 4
+         * 添加统计查询复合索引
+         */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                Log.i(TAG, "执行数据库迁移 3 -> 4")
+                try {
+                    // 添加统计查询优化索引（类型+时间+分类）
+                    db.execSQL("CREATE INDEX IF NOT EXISTS idx_stats ON expense(type, timestamp, category)")
+                } catch (e: Exception) {
+                    Log.w(TAG, "迁移索引创建失败: ${e.message}")
+                }
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: buildDatabase(context).also { INSTANCE = it }
@@ -78,7 +93,7 @@ abstract class AppDatabase : RoomDatabase() {
                 AppDatabase::class.java,
                 Constants.DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 // 移除 Callback，改用 Repository 初始化默认分类
                 // 这样更安全，避免在数据库创建时的线程问题

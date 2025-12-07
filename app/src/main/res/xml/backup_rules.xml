@@ -1,13 +1,36 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android Auto Backup 规则配置 (API < 31)
+
+    本地记账应用备份策略：
+    1. 包含：数据库文件、用户设置
+    2. 排除：加密密钥、缓存文件、临时文件、日志
+
+    注意：此文件仅适用于 API 30 及以下版本
+    API 31+ 使用 data_extraction_rules.xml
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- 包含数据库文件 -->
+    <include domain="database" path="local_expense.db" />
+    <include domain="database" path="local_expense.db-wal" />
+    <include domain="database" path="local_expense.db-shm" />
+
+    <!-- 包含用户设置（非加密的降级存储） -->
+    <include domain="sharedpref" path="local_expense_secure_prefs_fallback.xml" />
+
+    <!-- 包含规则缓存 -->
+    <include domain="file" path="transaction_rules.json" />
+
+    <!-- 排除加密相关文件（密钥不应备份，恢复后需重新生成） -->
+    <exclude domain="sharedpref" path="local_expense_secure_prefs.xml" />
+    <exclude domain="sharedpref" path="androidx.security.crypto.encrypted_prefs.xml" />
+
+    <!-- 排除缓存目录 -->
+    <exclude domain="cache" path="." />
+    <exclude domain="external" path="." />
+
+    <!-- 排除临时文件 -->
+    <exclude domain="file" path="no_backup/" />
+    <exclude domain="file" path="*.tmp" />
+    <exclude domain="file" path="*.log" />
 </full-backup-content>
