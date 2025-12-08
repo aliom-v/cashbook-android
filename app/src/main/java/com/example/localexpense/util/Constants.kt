@@ -157,19 +157,48 @@ object CategoryNames {
 /**
  * 金额工具类
  * 使用 BigDecimal 进行精确计算，避免浮点数精度问题
+ * 性能优化：缓存常用常量，使用 String 构造函数避免 double 精度损失
+ *
+ * 优化策略：
+ * - 简单数字使用快速路径直接解析
+ * - 复杂格式（带逗号）才使用 BigDecimal
+ * - 预编译正则表达式避免重复编译
  */
 object AmountUtils {
     private const val SCALE = 2 // 保留2位小数
 
+    // 缓存常用常量，避免重复创建
+    private val ZERO = BigDecimal.ZERO
+    private val HUNDRED = BigDecimal("100")
+
+    // 预编译简单数字模式（用于快速路径判断）
+    private val SIMPLE_NUMBER_REGEX = Regex("^\\d+(\\.\\d{1,2})?$")
+
     /**
      * 安全地将字符串转换为 Double
+     * 优化：简单数字使用快速路径
      */
     fun parseAmount(str: String?): Double? {
         if (str.isNullOrBlank()) return null
+
+        val trimmed = str.trim()
+        if (trimmed.isEmpty()) return null
+
         return try {
-            BigDecimal(str.replace(",", ""))
-                .setScale(SCALE, RoundingMode.HALF_UP)
-                .toDouble()
+            // 快速路径：简单数字格式（无逗号、无货币符号）
+            if (SIMPLE_NUMBER_REGEX.matches(trimmed)) {
+                trimmed.toDoubleOrNull()?.let { amount ->
+                    // 四舍五入到2位小数
+                    kotlin.math.round(amount * 100) / 100
+                }
+            } else {
+                // 复杂格式：移除逗号后使用 BigDecimal
+                val cleaned = trimmed.replace(",", "")
+                if (cleaned.isEmpty()) return null
+                BigDecimal(cleaned)
+                    .setScale(SCALE, RoundingMode.HALF_UP)
+                    .toDouble()
+            }
         } catch (e: Exception) {
             null
         }
@@ -179,7 +208,7 @@ object AmountUtils {
      * 格式化金额显示
      */
     fun format(amount: Double): String {
-        return BigDecimal(amount)
+        return BigDecimal.valueOf(amount)
             .setScale(SCALE, RoundingMode.HALF_UP)
             .toString()
     }
@@ -188,7 +217,7 @@ object AmountUtils {
      * 安全加法
      */
     fun add(a: Double, b: Double): Double {
-        return BigDecimal(a).add(BigDecimal(b))
+        return BigDecimal.valueOf(a).add(BigDecimal.valueOf(b))
             .setScale(SCALE, RoundingMode.HALF_UP)
             .toDouble()
     }
@@ -197,7 +226,7 @@ object AmountUtils {
      * 安全减法
      */
     fun subtract(a: Double, b: Double): Double {
-        return BigDecimal(a).subtract(BigDecimal(b))
+        return BigDecimal.valueOf(a).subtract(BigDecimal.valueOf(b))
             .setScale(SCALE, RoundingMode.HALF_UP)
             .toDouble()
     }
@@ -207,7 +236,7 @@ object AmountUtils {
      */
     fun divide(a: Double, b: Double): Double {
         if (b == 0.0) return 0.0
-        return BigDecimal(a).divide(BigDecimal(b), SCALE, RoundingMode.HALF_UP)
+        return BigDecimal.valueOf(a).divide(BigDecimal.valueOf(b), SCALE, RoundingMode.HALF_UP)
             .toDouble()
     }
 
@@ -216,7 +245,10 @@ object AmountUtils {
      */
     fun percentage(part: Double, total: Double): Double {
         if (total == 0.0) return 0.0
-        return divide(part * 100, total)
+        return BigDecimal.valueOf(part)
+            .multiply(HUNDRED)
+            .divide(BigDecimal.valueOf(total), SCALE, RoundingMode.HALF_UP)
+            .toDouble()
     }
 
     /**

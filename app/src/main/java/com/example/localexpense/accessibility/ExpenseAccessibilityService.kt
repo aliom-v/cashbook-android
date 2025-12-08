@@ -23,6 +23,7 @@ import com.example.localexpense.parser.TransactionParser
 import com.example.localexpense.ui.FloatingConfirmWindow
 import com.example.localexpense.ui.MainActivity
 import com.example.localexpense.util.*
+import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -146,6 +147,9 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
     // 最后一次成功处理时间
     private val lastSuccessTime = AtomicLong(System.currentTimeMillis())
+
+    // 协程作用域（用于异步保存，避免 runBlocking 导致 ANR）
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // 主线程 Handler
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -559,17 +563,27 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
     /**
      * 安全处理通知事件
+     * 修复：使用两阶段去重
      */
     private fun handleNotificationSafely(event: AccessibilityEvent, pkg: String) {
         try {
             val text = event.text?.joinToString(" ") ?: return
             val transaction = TransactionParser.parseNotification(text, pkg) ?: return
 
-            if (!duplicateChecker.shouldProcess(transaction.amount, transaction.merchant, transaction.type)) {
+            // 第一阶段：检查是否重复（不标记）
+            if (duplicateChecker.isDuplicate(
+                    transaction.amount,
+                    transaction.merchant,
+                    transaction.type,
+                    transaction.channel,
+                    text
+                )) {
+                Logger.d(TAG) { "跳过重复通知交易" }
                 return
             }
 
-            saveTransaction(transaction, "记账成功(通知)")
+            // 直接保存并标记（通知不需要用户确认）
+            saveTransactionWithMark(transaction, "记账成功(通知)")
 
         } catch (e: Exception) {
             Logger.e(TAG, "处理通知异常", e)
@@ -578,23 +592,26 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
     /**
      * 处理找到的交易
+     * 修复：使用原子操作防止竞态条件
      */
     private fun handleTransactionFound(transaction: ExpenseEntity) {
-        // 防重复（使用渠道信息和原始文本进行差异化去重）
-        if (!duplicateChecker.shouldProcess(
+        // 使用原子操作：检查重复的同时标记为"处理中"
+        if (!duplicateChecker.tryAcquireForProcessing(
                 transaction.amount,
                 transaction.merchant,
                 transaction.type,
                 transaction.channel,
                 transaction.rawText
             )) {
+            Logger.d(TAG) { "跳过交易(重复或处理中): ¥${Logger.maskAmount(transaction.amount)}" }
+            PerformanceMonitor.increment(PerformanceMonitor.Counters.DUPLICATES_SKIPPED)
             return
         }
 
         // 限流
         if (!RateLimiter.allowFloatingWindowShow()) {
-            // 限流时直接保存
-            saveTransaction(transaction, "记账成功")
+            // 限流时直接保存（会在保存成功后标记）
+            saveTransactionWithMark(transaction, "记账成功")
             return
         }
 
@@ -610,34 +627,53 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
     /**
      * 安全显示悬浮窗
+     * 修复：只有用户确认后才保存和标记为已处理
+     * 优化：用户取消时释放处理权，允许再次检测
      */
     private fun showFloatingWindowSafely(transaction: ExpenseEntity) {
         try {
-            if (isDestroyed.get()) return
+            if (isDestroyed.get()) {
+                // 服务已销毁，释放处理权
+                duplicateChecker.releaseProcessing(
+                    transaction.amount,
+                    transaction.merchant,
+                    transaction.type,
+                    transaction.channel
+                )
+                return
+            }
 
             if (FloatingConfirmWindow.hasPermission(this)) {
                 floatingWindow?.show(
                     transaction = transaction,
                     onConfirm = { confirmed ->
+                        // 用户确认后才保存，保存成功后标记为已处理
                         workerHandler?.post {
-                            saveTransaction(confirmed, "记账成功")
+                            saveTransactionWithMark(confirmed, "记账成功")
                         }
                     },
                     onDismiss = {
-                        Logger.d(TAG) { "用户取消记账" }
+                        // 用户取消，释放处理权，允许下次再次检测
+                        duplicateChecker.releaseProcessing(
+                            transaction.amount,
+                            transaction.merchant,
+                            transaction.type,
+                            transaction.channel
+                        )
+                        Logger.d(TAG) { "用户取消记账，已释放处理权" }
                     }
                 )
             } else {
-                // 无悬浮窗权限，直接保存
+                // 无悬浮窗权限，直接保存并标记
                 workerHandler?.post {
-                    saveTransaction(transaction, "记账成功", showMerchant = true)
+                    saveTransactionWithMark(transaction, "记账成功", showMerchant = true)
                 }
             }
         } catch (e: Exception) {
             Logger.e(TAG, "显示悬浮窗异常", e)
-            // 降级处理
+            // 降级处理：直接保存并标记
             workerHandler?.post {
-                saveTransaction(transaction, "记账成功")
+                saveTransactionWithMark(transaction, "记账成功")
             }
         }
     }
@@ -717,6 +753,88 @@ class ExpenseAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * 保存交易并标记为已处理
+     * 修复：只有在保存成功后才标记为已处理，避免用户取消或保存失败后无法再次记账
+     * 优化：使用协程异步保存，避免 runBlocking 导致 ANR
+     *
+     * @param transaction 交易实体
+     * @param title 通知标题
+     * @param showMerchant 是否在通知中显示商户名
+     */
+    private fun saveTransactionWithMark(transaction: ExpenseEntity, title: String, showMerchant: Boolean = false) {
+        val repo = repository
+        if (repo == null) {
+            Logger.w(TAG, "Repository 不可用，释放处理权")
+            // Repository 不可用时释放处理权
+            duplicateChecker.releaseProcessing(
+                transaction.amount,
+                transaction.merchant,
+                transaction.type,
+                transaction.channel
+            )
+            return
+        }
+
+        // 使用协程异步保存，避免阻塞
+        serviceScope.launch {
+            try {
+                val success = repo.insertTransactionSync(transaction)
+                if (success) {
+                    // 保存成功后正式标记为已处理（会自动移除处理中状态）
+                    duplicateChecker.markProcessed(
+                        transaction.amount,
+                        transaction.merchant,
+                        transaction.type,
+                        transaction.channel,
+                        transaction.rawText
+                    )
+
+                    // 重置错误计数，更新成功时间
+                    consecutiveErrors.set(0)
+                    lastSuccessTime.set(System.currentTimeMillis())
+
+                    val typeText = if (transaction.type == "income") "收入" else "支出"
+                    val content = if (showMerchant) {
+                        "$typeText ¥${transaction.amount} - ${transaction.merchant}"
+                    } else {
+                        "$typeText ¥${transaction.amount}"
+                    }
+                    // 在主线程显示通知
+                    withContext(Dispatchers.Main) {
+                        showNotificationSafely(title, content)
+                    }
+
+                    Logger.i(TAG, "交易保存成功并已标记: ¥${Logger.maskAmount(transaction.amount)}")
+                } else {
+                    // 保存失败，释放处理权，允许重试
+                    duplicateChecker.releaseProcessing(
+                        transaction.amount,
+                        transaction.merchant,
+                        transaction.type,
+                        transaction.channel
+                    )
+                    Logger.w(TAG, "交易保存失败，已释放处理权")
+                    withContext(Dispatchers.Main) {
+                        showNotificationSafely("记账失败", "保存失败，请稍后重试")
+                    }
+                }
+            } catch (e: Exception) {
+                // 异常时释放处理权
+                duplicateChecker.releaseProcessing(
+                    transaction.amount,
+                    transaction.merchant,
+                    transaction.type,
+                    transaction.channel
+                )
+                Logger.e(TAG, "保存交易异常，已释放处理权", e)
+                withContext(Dispatchers.Main) {
+                    showNotificationSafely("记账失败", "发生异常: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
      * 安全显示通知
      */
     private fun showNotificationSafely(title: String, content: String) {
@@ -768,7 +886,7 @@ class ExpenseAccessibilityService : AccessibilityService() {
         val startTime = System.currentTimeMillis()
 
         try {
-            collectTextRecursiveWithTimeout(node, result, 0, startTime)
+            collectTextRecursiveWithTimeout(node, result, 0, startTime, 0)
         } catch (e: Exception) {
             Logger.e(TAG, "收集文本异常", e)
         }
@@ -780,25 +898,32 @@ class ExpenseAccessibilityService : AccessibilityService() {
         node: AccessibilityNodeInfo?,
         list: MutableList<String>,
         depth: Int,
-        startTime: Long
-    ) {
-        if (node == null) return
-        if (depth > Constants.MAX_NODE_COLLECT_DEPTH) return
-        if (list.size >= Constants.MAX_COLLECTED_TEXT_COUNT) return
+        startTime: Long,
+        nodeCount: Int
+    ): Int {
+        if (node == null) return nodeCount
+        if (depth > Constants.MAX_NODE_COLLECT_DEPTH) return nodeCount
+        if (list.size >= Constants.MAX_COLLECTED_TEXT_COUNT) return nodeCount
 
-        // 超时检查
-        if (System.currentTimeMillis() - startTime > TEXT_COLLECT_TIMEOUT_MS) {
-            Logger.w(TAG, "文本收集超时，已收集 ${list.size} 条")
-            return
+        var currentNodeCount = nodeCount + 1
+
+        // 超时检查（每处理一定数量节点检查一次）
+        if (currentNodeCount % 20 == 0) {
+            if (System.currentTimeMillis() - startTime > TEXT_COLLECT_TIMEOUT_MS) {
+                Logger.w(TAG, "文本收集超时，已收集 ${list.size} 条")
+                return currentNodeCount
+            }
         }
 
-        // 内存压力检查（提前触发，避免OOM）
-        val runtime = Runtime.getRuntime()
-        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
-        val maxMemory = runtime.maxMemory()
-        if (usedMemory > maxMemory * 0.75) {  // 75%阈值，提前响应
-            Logger.w(TAG, "内存压力过大(${usedMemory * 100 / maxMemory}%)，停止收集")
-            return
+        // 内存压力检查（每处理 50 个节点检查一次，避免频繁检查开销）
+        if (currentNodeCount % 50 == 0) {
+            val runtime = Runtime.getRuntime()
+            val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+            val maxMemory = runtime.maxMemory()
+            if (usedMemory > maxMemory * 0.75) {
+                Logger.w(TAG, "内存压力过大(${usedMemory * 100 / maxMemory}%)，停止收集")
+                return currentNodeCount
+            }
         }
 
         try {
@@ -814,15 +939,10 @@ class ExpenseAccessibilityService : AccessibilityService() {
             for (i in 0 until childCount) {
                 if (list.size >= Constants.MAX_COLLECTED_TEXT_COUNT) break
 
-                // 再次检查超时
-                if (System.currentTimeMillis() - startTime > TEXT_COLLECT_TIMEOUT_MS) {
-                    break
-                }
-
                 var child: AccessibilityNodeInfo? = null
                 try {
                     child = node.getChild(i)
-                    collectTextRecursiveWithTimeout(child, list, depth + 1, startTime)
+                    currentNodeCount = collectTextRecursiveWithTimeout(child, list, depth + 1, startTime, currentNodeCount)
                 } finally {
                     recycleNodeSafely(child)
                 }
@@ -830,6 +950,8 @@ class ExpenseAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
             // 忽略单个节点的异常
         }
+
+        return currentNodeCount
     }
 
     /**
@@ -930,6 +1052,13 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
         repository = null
         isInitialized.set(false)
+
+        // 取消协程作用域
+        try {
+            serviceScope.cancel()
+        } catch (e: Exception) {
+            // 忽略
+        }
 
         // 停止前台服务
         try {

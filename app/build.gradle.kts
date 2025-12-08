@@ -17,8 +17,8 @@ android {
         applicationId = "com.example.localexpense"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.7.0"
+        versionCode = 8
+        versionName = "1.8.0"
     }
 
     // 仅保留中文资源，减小 APK 体积

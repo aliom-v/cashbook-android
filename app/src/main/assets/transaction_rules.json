@@ -1,7 +1,7 @@
 {
-  "version": "1.6.0",
+  "version": "1.7.0",
   "updateTime": "2025-12-08",
-  "description": "自动记账规则配置文件 - 增强转账和红包识别",
+  "description": "自动记账规则配置文件 - 修复识别问题，增加更多场景",
   "apps": [
     {
       "packageName": "com.tencent.mm",
@@ -90,6 +90,37 @@
           "priority": 15
         },
         {
+          "type": "expense",
+          "triggerKeywords": [
+            "群收款已发起", "发起群收款", "群收款成功", "收款已发起"
+          ],
+          "excludeKeywords": ["填写金额", "发起收款"],
+          "amountRegex": [
+            "共\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元",
+            "￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"
+          ],
+          "merchantRegex": [],
+          "category": "群收款",
+          "priority": 14
+        },
+        {
+          "type": "expense",
+          "triggerKeywords": [
+            "支付分已扣款", "支付分扣款成功", "微信支付分", "先享后付"
+          ],
+          "excludeKeywords": ["开通支付分", "查看详情", "了解更多"],
+          "amountRegex": [
+            "￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"
+          ],
+          "merchantRegex": [
+            "商户[：:]\\s*(.+?)(?:\\s|$)"
+          ],
+          "category": "支付分",
+          "priority": 13
+        },
+        {
           "type": "income",
           "triggerKeywords": [
             "已收钱", "收款成功", "收到转账", "向你转账", "已收款", "转账已收",
@@ -136,6 +167,24 @@
           ],
           "category": "红包",
           "priority": 20
+        },
+        {
+          "type": "income",
+          "triggerKeywords": [
+            "二维码收款成功", "收款码收款", "已收款", "扫码收款成功",
+            "商家收款", "收款到账"
+          ],
+          "excludeKeywords": ["设置收款码", "我的收款码"],
+          "amountRegex": [
+            "￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "¥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"
+          ],
+          "merchantRegex": [
+            "付款方[：:]\\s*(.+?)(?:\\s|$)"
+          ],
+          "category": "二维码收款",
+          "priority": 16
         },
         {
           "type": "income",
@@ -205,6 +254,24 @@
         },
         {
           "type": "expense",
+          "triggerKeywords": [
+            "花呗分期成功", "分期付款成功", "分期支付成功", "已分期",
+            "分期已生效", "分期订单已创建"
+          ],
+          "excludeKeywords": ["选择分期", "分期方案", "去分期"],
+          "amountRegex": [
+            "￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "总金额[：:]?\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"
+          ],
+          "merchantRegex": [
+            "商家[：:]\\s*(.+?)(?:\\s|$)"
+          ],
+          "category": "花呗分期",
+          "priority": 13
+        },
+        {
+          "type": "expense",
           "triggerKeywords": ["转账成功", "转账已完成", "已转账"],
           "excludeKeywords": ["确认转账", "输入金额"],
           "amountRegex": [
@@ -217,6 +284,21 @@
           ],
           "category": "转账",
           "priority": 15
+        },
+        {
+          "type": "expense",
+          "triggerKeywords": [
+            "余额宝转出成功", "转出到银行卡", "已转出", "提现成功",
+            "转出成功", "到账时间"
+          ],
+          "excludeKeywords": ["确认转出", "输入金额", "转出到"],
+          "amountRegex": [
+            "￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"
+          ],
+          "merchantRegex": [],
+          "category": "余额宝转出",
+          "priority": 14
         },
         {
           "type": "expense",
@@ -267,6 +349,21 @@
           ],
           "category": "红包",
           "priority": 20
+        },
+        {
+          "type": "income",
+          "triggerKeywords": [
+            "余额宝收益到账", "收益已到账", "昨日收益", "累计收益",
+            "利息到账", "收益发放"
+          ],
+          "excludeKeywords": [],
+          "amountRegex": [
+            "\\+([0-9,]+(?:\\.[0-9]{1,2})?)",
+            "([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"
+          ],
+          "merchantRegex": [],
+          "category": "理财收益",
+          "priority": 11
         },
         {
           "type": "income",

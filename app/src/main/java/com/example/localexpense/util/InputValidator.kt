@@ -217,6 +217,7 @@ object InputValidator {
 
     /**
      * 清理搜索关键词（用于 SQL LIKE 查询）
+     * 移除危险字符并转义 SQL LIKE 特殊字符
      */
     fun sanitizeSearchQuery(input: String?): String {
         if (input.isNullOrBlank()) return ""
@@ -224,6 +225,32 @@ object InputValidator {
         return input.trim()
             .take(Constants.MAX_SEARCH_QUERY_LENGTH)
             .let { removeDangerousChars(it) }
+    }
+
+    /**
+     * 转义 SQL LIKE 查询中的特殊字符
+     * 包括：\ % _ [ ]
+     * 注意：此方法应在 Repository 层调用，配合 ESCAPE '\' 使用
+     *
+     * @param query 已经过 sanitizeSearchQuery 处理的查询字符串
+     * @return 转义后的查询字符串
+     */
+    fun escapeSqlLikePattern(query: String): String {
+        return query
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+    }
+
+    /**
+     * 完整的搜索查询处理（清理 + 转义）
+     * 推荐在 ViewModel 或 Repository 中使用此方法
+     */
+    fun prepareSearchQuery(input: String?): String {
+        val sanitized = sanitizeSearchQuery(input)
+        return if (sanitized.isNotEmpty()) escapeSqlLikePattern(sanitized) else ""
     }
 
     // ========== 危险字符处理 ==========

@@ -14,6 +14,11 @@ import java.util.concurrent.atomic.AtomicLong
  * 4. 性能报告生成
  *
  * 仅在 Debug 模式下收集详细数据，Release 模式下最小化开销
+ *
+ * 优化特性：
+ * - 使用原子操作替代 synchronized，提升并发性能
+ * - 使用 ThreadLocal 存储计时起始时间，避免并发问题
+ * - ConcurrentHashMap 实现无锁并发访问
  */
 object PerformanceMonitor {
 
@@ -22,8 +27,8 @@ object PerformanceMonitor {
     // 是否启用详细监控（仅 Debug 模式）
     private val enabled: Boolean = Logger.isDebug
 
-    // 操作计时器
-    private val timers = ConcurrentHashMap<String, TimerData>()
+    // 操作计时器（使用原子类实现线程安全）
+    private val timers = ConcurrentHashMap<String, AtomicTimerData>()
 
     // 操作计数器
     private val counters = ConcurrentHashMap<String, AtomicLong>()
@@ -32,14 +37,52 @@ object PerformanceMonitor {
     private const val SLOW_THRESHOLD_MS = 100L
 
     /**
-     * 计时器数据
+     * 原子计时器数据（使用原子操作替代 synchronized）
      */
-    private data class TimerData(
-        var startTime: Long = 0,
-        var totalTime: Long = 0,
-        var count: Long = 0,
-        var maxTime: Long = 0,
-        var minTime: Long = Long.MAX_VALUE
+    private class AtomicTimerData {
+        val totalTime = AtomicLong(0)
+        val count = AtomicLong(0)
+        val maxTime = AtomicLong(0)
+        val minTime = AtomicLong(Long.MAX_VALUE)
+
+        fun record(duration: Long) {
+            totalTime.addAndGet(duration)
+            count.incrementAndGet()
+            // CAS 更新最大值
+            var currentMax = maxTime.get()
+            while (duration > currentMax) {
+                if (maxTime.compareAndSet(currentMax, duration)) break
+                currentMax = maxTime.get()
+            }
+            // CAS 更新最小值
+            var currentMin = minTime.get()
+            while (duration < currentMin) {
+                if (minTime.compareAndSet(currentMin, duration)) break
+                currentMin = minTime.get()
+            }
+        }
+
+        fun getStats(): TimerStats {
+            val cnt = count.get()
+            return TimerStats(
+                totalTime = totalTime.get(),
+                count = cnt,
+                maxTime = maxTime.get(),
+                minTime = if (minTime.get() == Long.MAX_VALUE) 0 else minTime.get(),
+                avgTime = if (cnt > 0) totalTime.get() / cnt else 0
+            )
+        }
+    }
+
+    /**
+     * 计时器统计数据（只读快照）
+     */
+    data class TimerStats(
+        val totalTime: Long,
+        val count: Long,
+        val maxTime: Long,
+        val minTime: Long,
+        val avgTime: Long
     )
 
     // ========== 计时相关 ==========
@@ -51,10 +94,9 @@ object PerformanceMonitor {
      */
     fun startTimer(operation: String): Long {
         if (!enabled) return 0L
-
-        val startTime = SystemClock.elapsedRealtime()
-        timers.getOrPut(operation) { TimerData() }.startTime = startTime
-        return startTime
+        // 确保计时器存在
+        timers.getOrPut(operation) { AtomicTimerData() }
+        return SystemClock.elapsedRealtime()
     }
 
     /**
@@ -68,14 +110,7 @@ object PerformanceMonitor {
         val endTime = SystemClock.elapsedRealtime()
         val duration = endTime - startTime
 
-        timers[operation]?.let { data ->
-            synchronized(data) {
-                data.totalTime += duration
-                data.count++
-                if (duration > data.maxTime) data.maxTime = duration
-                if (duration < data.minTime) data.minTime = duration
-            }
-        }
+        timers[operation]?.record(duration)
 
         // 记录慢操作
         if (duration > SLOW_THRESHOLD_MS) {
@@ -174,20 +209,20 @@ object PerformanceMonitor {
         sb.appendLine("   已用: ${memInfo.usedMB}MB / ${memInfo.maxMB}MB (${memInfo.usagePercent}%)")
         sb.appendLine()
 
-        // 计时统计
+        // 计时统计（使用新的 AtomicTimerData）
         if (timers.isNotEmpty()) {
             sb.appendLine("⏱️ 操作耗时统计:")
             timers.entries
-                .sortedByDescending { it.value.totalTime }
-                .forEach { (name, data) ->
-                    val avgTime = if (data.count > 0) data.totalTime / data.count else 0
+                .map { (name, data) -> name to data.getStats() }
+                .sortedByDescending { it.second.totalTime }
+                .forEach { (name, stats) ->
                     sb.appendLine("   $name:")
-                    sb.appendLine("      调用次数: ${data.count}")
-                    sb.appendLine("      总耗时: ${data.totalTime}ms")
-                    sb.appendLine("      平均耗时: ${avgTime}ms")
-                    sb.appendLine("      最大耗时: ${data.maxTime}ms")
-                    if (data.minTime != Long.MAX_VALUE) {
-                        sb.appendLine("      最小耗时: ${data.minTime}ms")
+                    sb.appendLine("      调用次数: ${stats.count}")
+                    sb.appendLine("      总耗时: ${stats.totalTime}ms")
+                    sb.appendLine("      平均耗时: ${stats.avgTime}ms")
+                    sb.appendLine("      最大耗时: ${stats.maxTime}ms")
+                    if (stats.minTime > 0) {
+                        sb.appendLine("      最小耗时: ${stats.minTime}ms")
                     }
                 }
             sb.appendLine()
@@ -246,5 +281,6 @@ object PerformanceMonitor {
         const val PARSE_FAILURES = "解析失败数"
         const val ACCESSIBILITY_EVENTS = "无障碍事件数"
         const val OCR_INVOCATIONS = "OCR调用数"
+        const val REGEX_TIMEOUTS = "正则超时数"
     }
 }

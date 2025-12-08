@@ -272,7 +272,7 @@ object OcrParser {
                 merchant = ruleMatch.merchant,
                 type = ruleMatch.rule.type,
                 timestamp = System.currentTimeMillis(),
-                channel = Channel.PACKAGE_MAP[packageName] ?: "其他",
+                channel = Channel.PACKAGE_MAP[packageName] ?: Channel.OTHER,
                 category = ruleMatch.rule.category,
                 categoryId = 0,
                 note = "OCR识别",

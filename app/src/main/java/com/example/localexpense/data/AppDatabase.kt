@@ -95,6 +95,9 @@ abstract class AppDatabase : RoomDatabase() {
             )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .fallbackToDestructiveMigrationOnDowngrade()
+                // 启用 WAL 模式，提升写入性能
+                // WAL 模式允许读写并发，减少锁等待
+                .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
                 // 移除 Callback，改用 Repository 初始化默认分类
                 // 这样更安全，避免在数据库创建时的线程问题
                 .build()

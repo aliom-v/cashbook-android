@@ -44,8 +44,8 @@ class MainViewModel(
     companion object {
         private const val TAG = "MainViewModel"
 
-        // Flow 缓存配置
-        private const val FLOW_STOP_TIMEOUT_MS = 5000L
+        // Flow 缓存配置（增加超时时间，减少内存抖动）
+        private const val FLOW_STOP_TIMEOUT_MS = 10000L
 
         fun factory(context: Context) = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -228,13 +228,14 @@ class MainViewModel(
         }
     }
 
+    /**
+     * 加载月度统计（优化：使用单次查询代替两次独立查询）
+     */
     private fun loadMonthlyStatsFlow(): Flow<Pair<Double, Double>> {
         val (monthStart, monthEnd) = DateUtils.getCurrentMonthRange()
-        return combine(
-            repo.getTotalExpense(monthStart, monthEnd),
-            repo.getTotalIncome(monthStart, monthEnd)
-        ) { expense, income ->
-            Pair(expense ?: 0.0, income ?: 0.0)
+        // 使用合并查询，减少数据库访问次数
+        return repo.getTotalExpenseAndIncome(monthStart, monthEnd).map { stat ->
+            Pair(stat.totalExpense, stat.totalIncome)
         }
     }
 

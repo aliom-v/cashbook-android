@@ -2,6 +2,7 @@ package com.example.localexpense.data
 
 import android.content.Context
 import com.example.localexpense.util.CryptoUtils
+import com.example.localexpense.util.InputValidator
 import com.example.localexpense.util.Logger
 import com.example.localexpense.util.RetryUtils
 import kotlinx.coroutines.CoroutineScope
@@ -179,26 +180,24 @@ class TransactionRepository private constructor(context: Context) {
         }
 
     /**
-     * 搜索交易记录，自动转义 SQL LIKE 特殊字符
+     * 搜索交易记录，自动清理和转义查询字符串
+     * 使用 InputValidator 进行完整的安全处理
      */
     fun search(query: String): Flow<List<ExpenseEntity>> {
-        val escapedQuery = escapeSqlLike(query)
-        return expenseDao.search(escapedQuery).map { list ->
+        // 使用 InputValidator 进行完整的安全处理（清理 + SQL LIKE 转义）
+        val safeQuery = InputValidator.prepareSearchQuery(query)
+        if (safeQuery.isEmpty()) {
+            return kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        return expenseDao.search(safeQuery).map { list ->
             list.map { decryptEntity(it) }
         }
     }
 
-    /**
-     * 转义 SQL LIKE 查询中的特殊字符
-     * 包括：\ % _ [ ] （SQLite 支持方括号作为字符类通配符）
-     */
+    // 保留内部方法用于向后兼容（已废弃，请使用 InputValidator.escapeSqlLikePattern）
+    @Deprecated("Use InputValidator.escapeSqlLikePattern instead", ReplaceWith("InputValidator.escapeSqlLikePattern(query)"))
     private fun escapeSqlLike(query: String): String {
-        return query
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-            .replace("[", "\\[")
-            .replace("]", "\\]")
+        return InputValidator.escapeSqlLikePattern(query)
     }
 
     fun getTotalExpense(start: Long, end: Long) = expenseDao.getTotalExpense(start, end)

@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.localexpense.util.AmountUtils
 import com.example.localexpense.util.Constants
+import com.example.localexpense.util.SafeRegexMatcher
 import com.example.localexpense.util.SecurePreferences
 import org.json.JSONArray
 import org.json.JSONObject
@@ -138,9 +139,16 @@ object RuleEngine {
             jsonArrayToList(it)
         } ?: emptyList()
 
-        // 解析金额正则（支持多个），跳过无效的正则
+        // 解析金额正则（支持多个），跳过无效或危险的正则
         val amountRegexList = jsonArrayToList(json.getJSONArray("amountRegex"))
         val amountPatterns = amountRegexList.mapNotNull { regex ->
+            // 先检查危险模式
+            val dangerCheck = SafeRegexMatcher.checkDangerousPattern(regex)
+            if (dangerCheck.isDangerous) {
+                invalidPatternCount++
+                Log.w(TAG, "⚠️ 规则[$category]包含危险正则模式: ${dangerCheck.reason}")
+                return@mapNotNull null
+            }
             try {
                 Pattern.compile(regex)
             } catch (e: java.util.regex.PatternSyntaxException) {
@@ -155,9 +163,16 @@ object RuleEngine {
             Log.e(TAG, "⚠️ 规则[$category]的所有金额正则都无效，该规则将无法匹配任何交易！")
         }
 
-        // 解析商户正则（可选），跳过无效的正则
+        // 解析商户正则（可选），跳过无效或危险的正则
         val merchantPatterns = json.optJSONArray("merchantRegex")?.let {
             jsonArrayToList(it).mapNotNull { regex ->
+                // 先检查危险模式
+                val dangerCheck = SafeRegexMatcher.checkDangerousPattern(regex)
+                if (dangerCheck.isDangerous) {
+                    invalidPatternCount++
+                    Log.w(TAG, "⚠️ 规则[$category]包含危险商户正则: ${dangerCheck.reason}")
+                    return@mapNotNull null
+                }
                 try {
                     Pattern.compile(regex)
                 } catch (e: java.util.regex.PatternSyntaxException) {
@@ -208,17 +223,24 @@ object RuleEngine {
             }
 
             // 2. 检查排除关键词
-            // 与 TransactionParser 逻辑一致：如果有触发关键词（成功场景），
-            // 则忽略排除关键词（可能是页面历史元素）
+            // 修复：如果没有触发成功关键词，且有排除关键词，则跳过
+            // 例如：页面同时显示"确认支付"（排除）和其他内容，但没有"支付成功"（触发）
             val hasExcludeKeyword = rule.excludeKeywords.isNotEmpty() &&
                 rule.excludeKeywords.any { joinedText.contains(it) }
 
-            // 只有在没有触发关键词的情况下，排除关键词才生效
-            // 但由于已经检查了触发关键词存在，这里直接跳过排除检查
-            // 注意：如果需要更严格的排除逻辑，可以取消下面的注释
-            // if (hasExcludeKeyword && !hasTriggerKeyword) {
-            //     continue
-            // }
+            // 如果有排除关键词，需要更严格的触发关键词匹配
+            // 只有当触发关键词明确表示"成功/完成"时，才忽略排除关键词
+            if (hasExcludeKeyword) {
+                val hasStrongTrigger = rule.triggerKeywords.any { keyword ->
+                    (keyword.contains("成功") || keyword.contains("完成") ||
+                     keyword.contains("已") || keyword.contains("到账")) &&
+                    joinedText.contains(keyword)
+                }
+                if (!hasStrongTrigger) {
+                    // 没有强触发词，跳过这个规则
+                    continue
+                }
+            }
 
             // 3. 提取金额（提前检查规则是否有有效的金额模式）
             if (rule.amountPatterns.isEmpty()) continue
@@ -268,14 +290,15 @@ object RuleEngine {
     /**
      * 提取金额
      * 使用 AmountUtils.parseAmount 进行精确解析，与 TransactionParser 保持一致
+     * 优化：使用 SafeRegexMatcher 防止 ReDoS 攻击
      */
     private fun extractAmount(texts: List<String>, patterns: List<Pattern>): Double? {
-        // 1. 优先使用规则定义的正则匹配
+        // 1. 优先使用规则定义的正则匹配（带超时保护）
         for (text in texts) {
             for (pattern in patterns) {
-                val matcher = pattern.matcher(text)
-                if (matcher.find()) {
-                    val amountStr = matcher.group(1) ?: continue
+                val result = SafeRegexMatcher.findWithTimeout(pattern, text)
+                if (result != null && result.matched) {
+                    val amountStr = result.group(1) ?: continue
                     // 使用 BigDecimal 进行精确解析
                     val amount = AmountUtils.parseAmount(amountStr)
                     if (amount != null && AmountUtils.isValidAmount(amount)) {
@@ -291,13 +314,13 @@ object RuleEngine {
             val trimmed = text.trim()
             // 跳过太长的文本（可能是订单号）
             if (trimmed.length > 15) continue
-            // 跳过时间格式
-            if (timePattern.matcher(trimmed).matches()) continue
-            if (timeDotPattern.matcher(trimmed).matches()) continue
+            // 跳过时间格式（使用 SafeRegexMatcher）
+            if (SafeRegexMatcher.matchesWithTimeout(timePattern, trimmed)) continue
+            if (SafeRegexMatcher.matchesWithTimeout(timeDotPattern, trimmed)) continue
 
-            val matcher = numPattern.matcher(trimmed)
-            if (matcher.find()) {
-                val amount = AmountUtils.parseAmount(matcher.group(1))
+            val result = SafeRegexMatcher.findWithTimeout(numPattern, trimmed)
+            if (result != null && result.matched) {
+                val amount = AmountUtils.parseAmount(result.group(1))
                 if (amount != null && AmountUtils.isValidAmount(amount)) {
                     return amount
                 }
@@ -309,13 +332,14 @@ object RuleEngine {
 
     /**
      * 提取商户
+     * 优化：使用 SafeRegexMatcher 防止 ReDoS 攻击
      */
     private fun extractMerchant(texts: List<String>, patterns: List<Pattern>): String? {
         for (text in texts) {
             for (pattern in patterns) {
-                val matcher = pattern.matcher(text)
-                if (matcher.find()) {
-                    return matcher.group(1)?.trim()?.take(Constants.MAX_MERCHANT_NAME_LENGTH)
+                val result = SafeRegexMatcher.findWithTimeout(pattern, text)
+                if (result != null && result.matched) {
+                    return result.group(1)?.trim()?.take(Constants.MAX_MERCHANT_NAME_LENGTH)
                 }
             }
         }

@@ -5,7 +5,9 @@ import com.example.localexpense.util.AmountUtils
 import com.example.localexpense.util.Channel
 import com.example.localexpense.util.Constants
 import com.example.localexpense.util.Logger
+import com.example.localexpense.util.PackageNames
 import com.example.localexpense.util.PerformanceMonitor
+import com.example.localexpense.util.SafeRegexMatcher
 import java.util.regex.Pattern
 
 /**
@@ -34,11 +36,28 @@ object TransactionParser {
 
     // 金额匹配模式（按优先级排序，带货币符号的优先）
     private val amountPatterns = listOf(
+        // 带货币符号（最高优先级）
         Pattern.compile("￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)"),
         Pattern.compile("¥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)"),
-        Pattern.compile("共\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),  // 红包格式
-        Pattern.compile("([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
-        Pattern.compile("金额[：:]?\\s*([0-9,]+(?:\\.[0-9]{1,2})?)")
+        // 红包和转账格式
+        Pattern.compile("共\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        Pattern.compile("共计\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        Pattern.compile("总计\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        Pattern.compile("合计\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        // 领取格式
+        Pattern.compile("领取了\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        Pattern.compile("你领取了\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        Pattern.compile("已存入\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        // 支付宝特有格式
+        Pattern.compile("付款\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        Pattern.compile("支付\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        Pattern.compile("收款\\s*([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元"),
+        // 金额标签格式
+        Pattern.compile("金额[：:]?\\s*([0-9,]+(?:\\.[0-9]{1,2})?)"),
+        Pattern.compile("实付[：:]?\\s*([0-9,]+(?:\\.[0-9]{1,2})?)"),
+        Pattern.compile("实收[：:]?\\s*([0-9,]+(?:\\.[0-9]{1,2})?)"),
+        // 通用格式（最后匹配）
+        Pattern.compile("([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元")
     )
 
     // 排除时间格式
@@ -233,7 +252,7 @@ object TransactionParser {
         // 判断交易类型和分类
         val type = determineType(joined, hasSendRedPacket, hasIncomeKeyword, hasExpenseKeyword, hasRefund)
         val category = determineCategory(joined)
-        val merchant = extractMerchant(texts, joined)
+        val merchant = extractMerchant(texts, joined, packageName)
 
         Logger.d(TAG) { "传统解析成功: type=$type, category=$category" }
 
@@ -285,10 +304,17 @@ object TransactionParser {
 
     /**
      * 提取金额
+     * 优化：先快速过滤可能包含金额的文本，再进行复杂匹配
      */
     private fun extractAmount(texts: List<String>): Double? {
+        // 快速过滤：只处理可能包含金额的文本
+        val potentialAmountTexts = texts.filter { text ->
+            text.contains('￥') || text.contains('¥') ||
+            text.contains('元') || text.any { it.isDigit() }
+        }
+
         // 优先使用带格式的金额模式
-        for (text in texts) {
+        for (text in potentialAmountTexts) {
             for (pattern in amountPatterns) {
                 val amount = tryExtractAmount(text, pattern)
                 if (amount != null) return amount
@@ -296,7 +322,7 @@ object TransactionParser {
         }
 
         // 兜底：查找独立的数字
-        for (text in texts) {
+        for (text in potentialAmountTexts) {
             val amount = tryExtractStandaloneAmount(text)
             if (amount != null) return amount
         }
@@ -306,12 +332,13 @@ object TransactionParser {
 
     /**
      * 尝试用指定模式提取金额
+     * 优化：使用 SafeRegexMatcher 防止 ReDoS
      */
     private fun tryExtractAmount(text: String, pattern: Pattern): Double? {
-        val matcher = pattern.matcher(text)
-        if (!matcher.find()) return null
+        val result = SafeRegexMatcher.findWithTimeout(pattern, text)
+        if (result == null || !result.matched) return null
 
-        val amountStr = matcher.group(1) ?: return null
+        val amountStr = result.group(1) ?: return null
         val amount = AmountUtils.parseAmount(amountStr) ?: return null
 
         return if (AmountUtils.isValidAmount(amount)) amount else null
@@ -319,6 +346,7 @@ object TransactionParser {
 
     /**
      * 尝试提取独立的数字金额
+     * 优化：使用 SafeRegexMatcher 防止 ReDoS
      */
     private fun tryExtractStandaloneAmount(text: String): Double? {
         val trimmed = text.trim()
@@ -327,26 +355,53 @@ object TransactionParser {
         if (trimmed.length > MAX_TEXT_LENGTH_FOR_AMOUNT) return null
         if (trimmed.isEmpty()) return null
 
-        // 排除时间格式
-        if (timePattern.matcher(trimmed).matches()) return null
-        if (timeDotPattern.matcher(trimmed).matches()) return null
+        // 排除时间格式（使用 SafeRegexMatcher）
+        if (SafeRegexMatcher.matchesWithTimeout(timePattern, trimmed)) return null
+        if (SafeRegexMatcher.matchesWithTimeout(timeDotPattern, trimmed)) return null
 
         // 匹配纯数字
-        val matcher = standaloneNumberPattern.matcher(trimmed)
-        if (!matcher.find()) return null
+        val result = SafeRegexMatcher.findWithTimeout(standaloneNumberPattern, trimmed)
+        if (result == null || !result.matched) return null
 
-        val amount = AmountUtils.parseAmount(matcher.group(1)) ?: return null
+        val amount = AmountUtils.parseAmount(result.group(1)) ?: return null
         return if (AmountUtils.isValidAmount(amount)) amount else null
     }
 
     /**
      * 提取商户名称
      */
-    private fun extractMerchant(texts: List<String>, joined: String): String {
-        // 尝试各种提取模式
-        return tryExtractFromRedPacket(texts)
-            ?: tryExtractFromTransfer(texts)
-            ?: getDefaultMerchant(joined)
+    private fun extractMerchant(texts: List<String>, joined: String, packageName: String? = null): String {
+        // 尝试各种提取模式（按优先级）
+        return tryExtractFromLabel(texts)           // 1. 标签格式（最可靠）
+            ?: tryExtractFromRedPacket(texts)       // 2. 红包格式
+            ?: tryExtractFromTransfer(texts)        // 3. 转账格式
+            ?: tryExtractFromPayment(texts)         // 4. 支付格式
+            ?: getDefaultMerchant(joined, packageName)  // 5. 默认（根据渠道）
+    }
+
+    /**
+     * 从标签格式提取商户（如：商户：xxx、收款方：xxx）
+     * 优化：使用 SafeRegexMatcher 防止 ReDoS
+     */
+    private fun tryExtractFromLabel(texts: List<String>): String? {
+        val labelPatterns = listOf(
+            Pattern.compile("(?:商户|商家|收款方|付款方|店铺)[：:]\\s*(.+?)(?:\\s|$)"),
+            Pattern.compile("(?:商户名称|商家名称)[：:]\\s*(.+?)(?:\\s|$)"),
+            Pattern.compile("(?:收款人|付款人)[：:]\\s*(.+?)(?:\\s|$)")
+        )
+
+        for (text in texts) {
+            for (pattern in labelPatterns) {
+                val result = SafeRegexMatcher.findWithTimeout(pattern, text)
+                if (result != null && result.matched) {
+                    val name = result.group(1)?.trim()
+                    if (!name.isNullOrBlank() && isValidMerchantName(name)) {
+                        return name
+                    }
+                }
+            }
+        }
+        return null
     }
 
     /**
@@ -365,6 +420,20 @@ object TransactionParser {
                 val name = text.removePrefix("来自").trim()
                 if (isValidMerchantName(name)) return name
             }
+
+            // "XXX发出的红包"
+            val sentIdx = text.indexOf("发出的红包")
+            if (sentIdx > 0) {
+                val name = text.substring(0, sentIdx).trim()
+                if (isValidMerchantName(name)) return name
+            }
+
+            // "XXX发的红包"
+            val sentIdx2 = text.indexOf("发的红包")
+            if (sentIdx2 > 0) {
+                val name = text.substring(0, sentIdx2).trim()
+                if (isValidMerchantName(name)) return name
+            }
         }
         return null
     }
@@ -381,11 +450,66 @@ object TransactionParser {
                 if (isValidMerchantName(name)) return name
             }
 
+            // "转给XXX"
+            val transferToIdx2 = text.indexOf("转给")
+            if (transferToIdx2 >= 0 && transferToIdx2 + 2 < text.length) {
+                val name = text.substring(transferToIdx2 + 2).trim()
+                if (isValidMerchantName(name)) return name
+            }
+
             // "XXX向你转账"
             val transferFromIdx = text.indexOf("向你转账")
             if (transferFromIdx > 0) {
                 val name = text.substring(0, transferFromIdx).trim()
                 if (isValidMerchantName(name)) return name
+            }
+
+            // "XXX给你转账"
+            val transferFromIdx2 = text.indexOf("给你转账")
+            if (transferFromIdx2 > 0) {
+                val name = text.substring(0, transferFromIdx2).trim()
+                if (isValidMerchantName(name)) return name
+            }
+
+            // "收到XXX的转账"
+            val pattern = Pattern.compile("收到(.+?)的转账")
+            val result = SafeRegexMatcher.findWithTimeout(pattern, text)
+            if (result != null && result.matched) {
+                val name = result.group(1)?.trim()
+                if (!name.isNullOrBlank() && isValidMerchantName(name)) return name
+            }
+        }
+        return null
+    }
+
+    /**
+     * 从支付相关文本提取商户
+     * 优化：使用 SafeRegexMatcher 防止 ReDoS
+     */
+    private fun tryExtractFromPayment(texts: List<String>): String? {
+        for (text in texts) {
+            // "向XXX付款"
+            val payToPattern = Pattern.compile("向(.+?)(?:付款|支付)")
+            val payToResult = SafeRegexMatcher.findWithTimeout(payToPattern, text)
+            if (payToResult != null && payToResult.matched) {
+                val name = payToResult.group(1)?.trim()
+                if (!name.isNullOrBlank() && isValidMerchantName(name)) return name
+            }
+
+            // "在XXX消费"
+            val consumePattern = Pattern.compile("在(.+?)消费")
+            val consumeResult = SafeRegexMatcher.findWithTimeout(consumePattern, text)
+            if (consumeResult != null && consumeResult.matched) {
+                val name = consumeResult.group(1)?.trim()
+                if (!name.isNullOrBlank() && isValidMerchantName(name)) return name
+            }
+
+            // "XXX-支付成功" 或 "XXX - 付款成功"
+            val dashPattern = Pattern.compile("^(.+?)\\s*[-–—]\\s*(?:支付|付款)")
+            val dashResult = SafeRegexMatcher.findWithTimeout(dashPattern, text)
+            if (dashResult != null && dashResult.matched) {
+                val name = dashResult.group(1)?.trim()
+                if (!name.isNullOrBlank() && isValidMerchantName(name)) return name
             }
         }
         return null
@@ -393,12 +517,21 @@ object TransactionParser {
 
     /**
      * 获取默认商户名
+     * 根据包名返回对应渠道的默认商户名
      */
-    private fun getDefaultMerchant(joined: String): String = when {
-        joined.contains("发") && joined.contains("红包") -> "发出红包"
-        joined.contains("红包") -> "微信红包"
-        joined.contains("转账") -> "微信转账"
-        else -> "微信支付"
+    private fun getDefaultMerchant(joined: String, packageName: String? = null): String {
+        val channelName = when (packageName) {
+            PackageNames.WECHAT -> "微信"
+            PackageNames.ALIPAY -> "支付宝"
+            PackageNames.UNIONPAY -> "云闪付"
+            else -> "支付"
+        }
+        return when {
+            joined.contains("发") && joined.contains("红包") -> "发出红包"
+            joined.contains("红包") -> "${channelName}红包"
+            joined.contains("转账") -> "${channelName}转账"
+            else -> "${channelName}支付"
+        }
     }
 
     /**
@@ -450,10 +583,18 @@ object TransactionParser {
         // 判断类型和分类
         val type = determineType(text, isSendRedPacket, hasIncomeKeyword, hasExpenseKeyword, isRefund)
         val category = determineCategory(text)
+
+        // 根据渠道获取默认商户名
+        val channelName = when (packageName) {
+            PackageNames.WECHAT -> "微信"
+            PackageNames.ALIPAY -> "支付宝"
+            PackageNames.UNIONPAY -> "云闪付"
+            else -> "支付"
+        }
         val merchant = when {
             isRefund -> "退款"
             isSendRedPacket -> "发出红包"
-            else -> "微信"
+            else -> channelName
         }
 
         return ExpenseEntity(
