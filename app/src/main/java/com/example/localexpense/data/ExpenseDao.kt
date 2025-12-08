@@ -22,11 +22,17 @@ interface ExpenseDao {
     fun getByDateRange(start: Long, end: Long): Flow<List<ExpenseEntity>>
 
     /**
-     * 搜索交易记录
+     * 搜索交易记录（带限制，防止大数据集ANR）
      * 注意：query 参数应在调用前进行 SQL LIKE 特殊字符转义
      */
-    @Query("SELECT * FROM expense WHERE (merchant LIKE '%' || :query || '%' ESCAPE '\\' OR note LIKE '%' || :query || '%' ESCAPE '\\' OR category LIKE '%' || :query || '%' ESCAPE '\\') ORDER BY timestamp DESC")
+    @Query("SELECT * FROM expense WHERE (merchant LIKE '%' || :query || '%' ESCAPE '\\' OR note LIKE '%' || :query || '%' ESCAPE '\\' OR category LIKE '%' || :query || '%' ESCAPE '\\') ORDER BY timestamp DESC LIMIT 200")
     fun search(query: String): Flow<List<ExpenseEntity>>
+
+    /**
+     * 分页搜索交易记录
+     */
+    @Query("SELECT * FROM expense WHERE (merchant LIKE '%' || :query || '%' ESCAPE '\\' OR note LIKE '%' || :query || '%' ESCAPE '\\' OR category LIKE '%' || :query || '%' ESCAPE '\\') ORDER BY timestamp DESC LIMIT :limit OFFSET :offset")
+    fun searchPaged(query: String, limit: Int, offset: Int): Flow<List<ExpenseEntity>>
 
     @Query("SELECT SUM(amount) FROM expense WHERE type = 'expense' AND timestamp BETWEEN :start AND :end")
     fun getTotalExpense(start: Long, end: Long): Flow<Double?>

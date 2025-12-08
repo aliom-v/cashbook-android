@@ -1,13 +1,13 @@
 package com.example.localexpense.data
 
 import android.content.Context
-import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.localexpense.util.Constants
+import com.example.localexpense.util.Logger
 
 @Database(
     entities = [ExpenseEntity::class, CategoryEntity::class, BudgetEntity::class],
@@ -31,13 +31,13 @@ abstract class AppDatabase : RoomDatabase() {
          */
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                Log.i(TAG, "执行数据库迁移 1 -> 2")
+                Logger.i(TAG, "执行数据库迁移 1 -> 2")
                 // 确保表结构完整性（示例：添加索引提升查询性能）
                 try {
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_expense_timestamp ON expense(timestamp)")
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_expense_type ON expense(type)")
                 } catch (e: Exception) {
-                    Log.w(TAG, "迁移索引创建失败（可能已存在）: ${e.message}")
+                    Logger.w(TAG, "迁移索引创建失败（可能已存在）: ${e.message}")
                 }
             }
         }
@@ -48,7 +48,7 @@ abstract class AppDatabase : RoomDatabase() {
          */
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                Log.i(TAG, "执行数据库迁移 2 -> 3")
+                Logger.i(TAG, "执行数据库迁移 2 -> 3")
                 try {
                     // 删除旧索引（如果存在），使用新的命名规范
                     db.execSQL("DROP INDEX IF EXISTS index_expense_timestamp")
@@ -60,7 +60,7 @@ abstract class AppDatabase : RoomDatabase() {
                     db.execSQL("CREATE INDEX IF NOT EXISTS idx_category ON expense(category)")
                     db.execSQL("CREATE INDEX IF NOT EXISTS idx_merchant ON expense(merchant)")
                 } catch (e: Exception) {
-                    Log.w(TAG, "迁移索引创建失败: ${e.message}")
+                    Logger.w(TAG, "迁移索引创建失败: ${e.message}")
                 }
             }
         }
@@ -71,12 +71,12 @@ abstract class AppDatabase : RoomDatabase() {
          */
         private val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                Log.i(TAG, "执行数据库迁移 3 -> 4")
+                Logger.i(TAG, "执行数据库迁移 3 -> 4")
                 try {
                     // 添加统计查询优化索引（类型+时间+分类）
                     db.execSQL("CREATE INDEX IF NOT EXISTS idx_stats ON expense(type, timestamp, category)")
                 } catch (e: Exception) {
-                    Log.w(TAG, "迁移索引创建失败: ${e.message}")
+                    Logger.w(TAG, "迁移索引创建失败: ${e.message}")
                 }
             }
         }

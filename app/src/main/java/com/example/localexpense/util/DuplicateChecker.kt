@@ -41,6 +41,11 @@ class DuplicateChecker(
         }
     }
 
+    // 预编译正则表达式（避免重复编译）
+    private val timeRegex = Regex("\\d{1,2}:\\d{2}(:\\d{2})?")
+    private val dateRegex = Regex("\\d{4}-\\d{2}-\\d{2}")
+    private val whitespaceRegex = Regex("\\s+")
+
     // 统计信息
     @Volatile
     private var totalChecks: Long = 0
@@ -127,10 +132,10 @@ class DuplicateChecker(
     private fun normalizeRawText(rawText: String): String {
         return rawText
             // 移除时间戳格式 (如 12:30, 2024-01-01)
-            .replace(Regex("\\d{1,2}:\\d{2}(:\\d{2})?"), "")
-            .replace(Regex("\\d{4}-\\d{2}-\\d{2}"), "")
+            .replace(timeRegex, "")
+            .replace(dateRegex, "")
             // 移除多余空格
-            .replace(Regex("\\s+"), " ")
+            .replace(whitespaceRegex, " ")
             .trim()
     }
 

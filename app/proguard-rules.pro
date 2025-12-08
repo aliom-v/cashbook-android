@@ -194,6 +194,8 @@
 
 # 规则引擎统计类
 -keep class com.example.localexpense.parser.RuleEngine$RuleStats { *; }
+-keep class com.example.localexpense.parser.RuleEngine$TransactionRule { *; }
+-keep class com.example.localexpense.parser.RuleEngine$MatchResult { *; }
 
 # ==================== UI 状态类 ====================
 # UI 状态（sealed class 和 data class）
