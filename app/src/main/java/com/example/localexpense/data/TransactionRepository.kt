@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import androidx.room.withTransaction
 
 class TransactionRepository private constructor(context: Context) {
 
@@ -204,6 +205,11 @@ class TransactionRepository private constructor(context: Context) {
 
     fun getTotalIncome(start: Long, end: Long) = expenseDao.getTotalIncome(start, end)
 
+    /**
+     * 获取收支总额（单次查询，性能更优）
+     */
+    fun getTotalExpenseAndIncome(start: Long, end: Long) = expenseDao.getTotalExpenseAndIncome(start, end)
+
     fun getCategoryStats(type: String, start: Long, end: Long) = expenseDao.getCategoryStats(type, start, end)
 
     fun getDailyStats(type: String, start: Long, end: Long) = expenseDao.getDailyStats(type, start, end)
@@ -258,10 +264,167 @@ class TransactionRepository private constructor(context: Context) {
     }
 
     /**
+     * 批量插入交易记录（带事务保护）
+     * 要么全部成功，要么全部失败，保证数据一致性
+     *
+     * @param entities 交易实体列表
+     * @return BatchInsertResult 包含成功/失败数量
+     */
+    suspend fun insertExpensesBatch(entities: List<ExpenseEntity>): BatchInsertResult {
+        if (entities.isEmpty()) {
+            return BatchInsertResult(0, 0, emptyList())
+        }
+
+        waitForInitialization()
+
+        return try {
+            db.withTransaction {
+                val encryptedEntities = entities.map { encryptEntity(it) }
+                encryptedEntities.forEach { expenseDao.insert(it) }
+            }
+            Logger.i(TAG, "批量插入成功: ${entities.size} 条记录")
+            BatchInsertResult(entities.size, 0, emptyList())
+        } catch (e: Exception) {
+            Logger.e(TAG, "批量插入失败", e)
+            // 事务回滚，所有记录都未插入
+            BatchInsertResult(0, entities.size, listOf(e.message ?: "未知错误"))
+        }
+    }
+
+    /**
+     * 批量插入交易记录（尽可能多地插入，失败的跳过）
+     * 适用于容错场景，会尝试插入所有记录
+     *
+     * @param entities 交易实体列表
+     * @return BatchInsertResult 包含成功/失败数量和错误信息
+     */
+    suspend fun insertExpensesBatchBestEffort(entities: List<ExpenseEntity>): BatchInsertResult {
+        if (entities.isEmpty()) {
+            return BatchInsertResult(0, 0, emptyList())
+        }
+
+        waitForInitialization()
+
+        var successCount = 0
+        var failCount = 0
+        val errors = mutableListOf<String>()
+
+        entities.forEach { entity ->
+            try {
+                expenseDao.insert(encryptEntity(entity))
+                successCount++
+            } catch (e: Exception) {
+                failCount++
+                errors.add("${entity.merchant}: ${e.message}")
+                Logger.w(TAG, "插入失败: ${entity.merchant}", e)
+            }
+        }
+
+        Logger.i(TAG, "批量插入完成: 成功=$successCount, 失败=$failCount")
+        return BatchInsertResult(successCount, failCount, errors)
+    }
+
+    /**
+     * 批量插入分类（带事务保护）
+     */
+    suspend fun insertCategoriesBatch(categories: List<CategoryEntity>): BatchInsertResult {
+        if (categories.isEmpty()) {
+            return BatchInsertResult(0, 0, emptyList())
+        }
+
+        return try {
+            db.withTransaction {
+                categories.forEach { categoryDao.insert(it) }
+            }
+            BatchInsertResult(categories.size, 0, emptyList())
+        } catch (e: Exception) {
+            Logger.e(TAG, "批量插入分类失败", e)
+            BatchInsertResult(0, categories.size, listOf(e.message ?: "未知错误"))
+        }
+    }
+
+    /**
+     * 批量插入预算（带事务保护）
+     */
+    suspend fun insertBudgetsBatch(budgets: List<BudgetEntity>): BatchInsertResult {
+        if (budgets.isEmpty()) {
+            return BatchInsertResult(0, 0, emptyList())
+        }
+
+        return try {
+            db.withTransaction {
+                budgets.forEach { budgetDao.insert(it) }
+            }
+            BatchInsertResult(budgets.size, 0, emptyList())
+        } catch (e: Exception) {
+            Logger.e(TAG, "批量插入预算失败", e)
+            BatchInsertResult(0, budgets.size, listOf(e.message ?: "未知错误"))
+        }
+    }
+
+    /**
      * 仅删除所有账单记录（保留分类和预算）
      */
     suspend fun deleteAllExpenses() {
         expenseDao.deleteAll()
+    }
+
+    /**
+     * 批量删除交易记录（带事务保护）
+     * 要么全部成功，要么全部失败
+     *
+     * @param ids 要删除的交易ID列表
+     * @return BatchDeleteResult 包含成功/失败数量
+     */
+    suspend fun deleteExpensesBatch(ids: List<Long>): BatchDeleteResult {
+        if (ids.isEmpty()) {
+            return BatchDeleteResult(0, 0, emptyList())
+        }
+
+        return try {
+            db.withTransaction {
+                ids.forEach { id ->
+                    expenseDao.deleteById(id)
+                }
+            }
+            Logger.i(TAG, "批量删除成功: ${ids.size} 条记录")
+            BatchDeleteResult(ids.size, 0, emptyList())
+        } catch (e: Exception) {
+            Logger.e(TAG, "批量删除失败", e)
+            // 事务回滚，所有记录都未删除
+            BatchDeleteResult(0, ids.size, listOf(e.message ?: "未知错误"))
+        }
+    }
+
+    /**
+     * 批量删除交易记录（尽可能多地删除，失败的跳过）
+     * 适用于容错场景
+     *
+     * @param ids 要删除的交易ID列表
+     * @return BatchDeleteResult 包含成功/失败数量
+     */
+    suspend fun deleteExpensesBatchBestEffort(ids: List<Long>): BatchDeleteResult {
+        if (ids.isEmpty()) {
+            return BatchDeleteResult(0, 0, emptyList())
+        }
+
+        var successCount = 0
+        var failCount = 0
+        val errors = mutableListOf<String>()
+
+        ids.forEach { id ->
+            try {
+                expenseDao.deleteById(id)
+                successCount++
+            } catch (e: Exception) {
+                failCount++
+                errors.add("ID $id: ${e.message}")
+                Logger.w(TAG, "删除失败: ID=$id", e)
+            }
+        }
+
+        Logger.i(TAG, "批量删除完成: 成功=$successCount, 失败=$failCount")
+        return BatchDeleteResult(successCount, failCount, errors)
     }
 
     /**
@@ -300,5 +463,43 @@ class TransactionRepository private constructor(context: Context) {
     private fun decryptEntity(entity: ExpenseEntity): ExpenseEntity {
         if (entity.rawText.isEmpty()) return entity
         return entity.copy(rawText = CryptoUtils.decrypt(entity.rawText))
+    }
+}
+
+/**
+ * 批量插入结果
+ */
+data class BatchInsertResult(
+    val successCount: Int,
+    val failCount: Int,
+    val errors: List<String>
+) {
+    val totalCount: Int get() = successCount + failCount
+    val hasErrors: Boolean get() = failCount > 0
+
+    fun toSummary(): String = buildString {
+        append("成功: $successCount")
+        if (failCount > 0) {
+            append(", 失败: $failCount")
+        }
+    }
+}
+
+/**
+ * 批量删除结果
+ */
+data class BatchDeleteResult(
+    val successCount: Int,
+    val failCount: Int,
+    val errors: List<String>
+) {
+    val totalCount: Int get() = successCount + failCount
+    val hasErrors: Boolean get() = failCount > 0
+
+    fun toSummary(): String = buildString {
+        append("成功删除: $successCount")
+        if (failCount > 0) {
+            append(", 失败: $failCount")
+        }
     }
 }

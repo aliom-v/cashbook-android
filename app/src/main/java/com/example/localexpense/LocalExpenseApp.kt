@@ -6,6 +6,7 @@ import android.os.StrictMode
 import android.util.Log
 import com.example.localexpense.data.TransactionRepository
 import com.example.localexpense.util.CryptoUtils
+import com.example.localexpense.util.DatabaseOptimizer
 import com.example.localexpense.util.Logger
 import com.example.localexpense.util.PerformanceMonitor
 import kotlinx.coroutines.CoroutineScope
@@ -107,6 +108,17 @@ class LocalExpenseApp : Application() {
                 // 首次访问可能需要生成密钥，耗时较长
                 com.example.localexpense.util.SecurePreferences.getInstance(applicationContext)
 
+                // 自动数据库优化（如果需要）
+                // 每周检查一次，碎片率超过20%时执行优化
+                try {
+                    val optimizeResult = DatabaseOptimizer.autoOptimizeIfNeeded(applicationContext)
+                    if (optimizeResult != null) {
+                        Logger.i(TAG, "数据库自动优化完成: 节省 ${optimizeResult.savedBytes / 1024}KB")
+                    }
+                } catch (e: Exception) {
+                    Logger.e(TAG, "数据库自动优化失败", e)
+                }
+
                 isFullyInitialized = true
 
                 if (BuildConfig.DEBUG) {
@@ -145,6 +157,13 @@ class LocalExpenseApp : Application() {
         // 清理去重检测器缓存
         com.example.localexpense.util.DuplicateChecker.getInstance().clear()
 
+        // 释放 OCR 识别器资源（非永久释放，需要时会重建）
+        try {
+            com.example.localexpense.ocr.OcrParser.release(permanent = false)
+        } catch (e: Exception) {
+            Logger.w(TAG, "释放OCR资源失败: ${e.message}")
+        }
+
         // 触发 GC
         System.gc()
     }
@@ -160,10 +179,19 @@ class LocalExpenseApp : Application() {
             TRIM_MEMORY_COMPLETE -> {
                 Logger.w(TAG, "内存严重不足 (level=$level)")
                 com.example.localexpense.util.DuplicateChecker.getInstance().clear()
+                // 严重内存不足时释放 OCR 资源
+                try {
+                    com.example.localexpense.ocr.OcrParser.release(permanent = false)
+                } catch (e: Exception) {
+                    Logger.w(TAG, "释放OCR资源失败: ${e.message}")
+                }
+                System.gc()
             }
             TRIM_MEMORY_MODERATE,
             TRIM_MEMORY_RUNNING_LOW -> {
                 Logger.w(TAG, "内存不足 (level=$level)")
+                // 中等内存压力时清理部分缓存
+                com.example.localexpense.util.DuplicateChecker.getInstance().clear()
             }
             TRIM_MEMORY_UI_HIDDEN -> {
                 // 应用进入后台，可以释放一些 UI 相关缓存

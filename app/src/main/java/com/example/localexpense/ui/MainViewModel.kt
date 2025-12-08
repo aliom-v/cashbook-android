@@ -108,9 +108,16 @@ class MainViewModel(
             is UserIntent.UpdateExpense -> updateExpense(intent.expense)
             is UserIntent.DeleteExpense -> deleteExpense(intent.expense)
 
+            // 对话框操作
+            is UserIntent.ShowAddDialog -> showAddDialog()
+            is UserIntent.ShowEditDialog -> showEditDialog(intent.expense)
+            is UserIntent.DismissDialog -> dismissDialog()
+
             // 搜索
             is UserIntent.Search -> search(intent.query)
             is UserIntent.ClearSearch -> clearSearch()
+            is UserIntent.ToggleSearchBar -> toggleSearchBar()
+            is UserIntent.SetSearchTypeFilter -> setSearchTypeFilter(intent.type)
 
             // 日历
             is UserIntent.SelectCalendarDate -> selectCalendarDate(intent.date)
@@ -281,6 +288,28 @@ class MainViewModel(
     private fun clearSearch() {
         _state.update { it.copy(searchQuery = "", searchResults = emptyList()) }
         _searchQuery.value = ""
+    }
+
+    // ==================== 对话框操作 ====================
+
+    private fun showAddDialog() {
+        _state.update { it.copy(showAddDialog = true, editingExpense = null) }
+    }
+
+    private fun showEditDialog(expense: ExpenseEntity) {
+        _state.update { it.copy(showAddDialog = true, editingExpense = expense) }
+    }
+
+    private fun dismissDialog() {
+        _state.update { it.copy(showAddDialog = false, editingExpense = null) }
+    }
+
+    private fun toggleSearchBar() {
+        _state.update { it.copy(showSearchBar = !it.showSearchBar) }
+    }
+
+    private fun setSearchTypeFilter(type: String?) {
+        _state.update { it.copy(searchTypeFilter = type) }
     }
 
     // ==================== 统计 ====================
@@ -723,13 +752,15 @@ class MainViewModel(
 
     /**
      * 获取筛选后的交易列表
+     * 修复：筛选结果为空时返回空列表而不是全部数据
      */
     fun getDisplayExpenses(): List<ExpenseEntity> {
         val currentState = _state.value
-        return if (currentState.isFiltering && currentState.filteredExpenses.isNotEmpty()) {
-            currentState.filteredExpenses
-        } else {
-            currentState.expenses
+        return when {
+            // 筛选模式：返回筛选结果（包括空列表）
+            currentState.isFiltering -> currentState.filteredExpenses
+            // 非筛选模式：返回全部数据
+            else -> currentState.expenses
         }
     }
 
@@ -773,7 +804,7 @@ class MainViewModel(
     }
 
     /**
-     * 删除选中的交易
+     * 删除选中的交易（使用事务保护的批量删除）
      */
     private fun deleteSelected() {
         val selectedIdList = _selectedIds.value.toList()
@@ -786,33 +817,19 @@ class MainViewModel(
             _state.update { it.startOperation(OperationState.Deleting) }
 
             try {
-                var successCount = 0
-                var failCount = 0
-
-                for (id in selectedIdList) {
-                    val expense = _state.value.expenses.find { it.id == id }
-                    if (expense != null) {
-                        val result = CoroutineHelper.runSafely {
-                            repo.deleteExpense(expense)
-                        }
-                        if (result.isSuccess) {
-                            successCount++
-                        } else {
-                            failCount++
-                        }
-                    }
-                }
+                // 使用事务保护的批量删除
+                val result = repo.deleteExpensesBatch(selectedIdList)
 
                 _state.update { it.endOperation() }
                 exitSelectionMode()
                 refreshStats()
 
-                val message = if (failCount == 0) {
-                    "已删除 $successCount 条记录"
+                val message = if (result.hasErrors) {
+                    "删除失败: ${result.errors.firstOrNull() ?: "未知错误"}"
                 } else {
-                    "已删除 $successCount 条，$failCount 条失败"
+                    "已删除 ${result.successCount} 条记录"
                 }
-                sendEvent(UiEvent.ShowToast(message))
+                sendEvent(UiEvent.ShowToast(message, isError = result.hasErrors))
 
             } catch (e: Exception) {
                 Logger.e(TAG, "批量删除失败", e)

@@ -52,18 +52,35 @@ object TransactionParser {
     private val incomeKeywords = setOf(
         // 红包收入
         "已领取", "领取了", "已存入", "存入零钱", "红包已存入",
-        "红包到账", "已存入零钱", "收到红包",
+        "红包到账", "已存入零钱", "收到红包", "领取成功", "红包已领取",
+        "拆红包成功", "恭喜发财", "大吉大利", "零钱已入账", "你领取了",
+        "红包已收", "收下红包", "已收下",
         // 转账收入
         "向你转账", "给你转", "转账给你", "已收钱", "收款成功",
         "已到账", "入账成功", "收到转账", "已收款", "转账已收",
-        "收钱成功", "到账成功"
+        "收钱成功", "到账成功", "转入成功", "收款到账",
+        // 退款
+        "退款成功", "退款到账", "已退款", "退款已到账", "退款已存入",
+        "已原路退回", "退款已入账", "退回成功", "退款中", "退款处理成功",
+        // 支付宝特有
+        "余额宝收益", "收益到账", "利息到账"
     )
 
     // 支出关键词
     private val expenseKeywords = setOf(
         "支付成功", "付款成功", "已付款", "已支付",
-        "转账成功", "已转账",
-        "扫码付款", "消费"
+        "转账成功", "已转账", "转出成功",
+        "扫码付款", "消费", "消费成功",
+        // 免密支付
+        "免密支付成功", "免密支付", "小额免密", "小额免密支付",
+        "已扣款", "扣款成功", "已自动扣款",
+        // 自动扣款
+        "自动扣款成功", "已自动扣费", "自动续费成功", "代扣成功",
+        "连续包月", "自动续费", "订阅扣费",
+        // 支付宝特有
+        "花呗支付", "余额支付", "银行卡支付", "信用卡支付",
+        // 云闪付特有
+        "交易成功", "刷卡成功", "银联支付"
     )
 
     // 排除关键词（支付确认页面特征）
@@ -71,7 +88,12 @@ object TransactionParser {
         "确认付款", "立即支付", "确认支付", "输入密码",
         "待支付", "去支付", "支付方式", "付款方式",
         "确认转账", "请输入", "去付款",
-        "选择红包个数", "请填写金额", "塞钱进红包", "添加表情"
+        "选择红包个数", "请填写金额", "塞钱进红包", "添加表情",
+        // 增加更多排除关键词
+        "请确认", "验证", "指纹验证", "面容验证",
+        "选择付款方式", "更换付款方式", "添加银行卡",
+        "订单详情", "商品详情", "购买", "立即购买",
+        "加入购物车", "结算", "提交订单"
     )
 
     // 发红包关键词（支出，优先级最高）
@@ -82,6 +104,12 @@ object TransactionParser {
         "共发出", "个红包，共",
         "红包已塞好", "已塞钱", "塞好了",
         "发红包成功", "红包已发出", "发出了红包", "红包发出成功"
+    )
+
+    // 退款关键词（收入）
+    private val refundKeywords = setOf(
+        "退款成功", "退款到账", "已退款", "退款已到账",
+        "退款已存入", "已原路退回", "退款已入账", "退回成功"
     )
 
     // 渠道映射
@@ -178,8 +206,9 @@ object TransactionParser {
         val hasIncomeKeyword = incomeKeywords.any { joined.contains(it) }
         val hasExpenseKeyword = expenseKeywords.any { joined.contains(it) }
         val hasSendRedPacket = sendRedPacketKeywords.any { joined.contains(it) }
+        val hasRefund = refundKeywords.any { joined.contains(it) }
 
-        if (!hasIncomeKeyword && !hasExpenseKeyword && !hasSendRedPacket) {
+        if (!hasIncomeKeyword && !hasExpenseKeyword && !hasSendRedPacket && !hasRefund) {
             Logger.d(TAG) { "未找到交易关键词" }
             return null
         }
@@ -193,7 +222,7 @@ object TransactionParser {
         }
 
         // 判断交易类型和分类
-        val type = determineType(joined, hasSendRedPacket, hasIncomeKeyword, hasExpenseKeyword)
+        val type = determineType(joined, hasSendRedPacket, hasIncomeKeyword, hasExpenseKeyword, hasRefund)
         val category = determineCategory(joined)
         val merchant = extractMerchant(texts, joined)
 
@@ -220,9 +249,11 @@ object TransactionParser {
         text: String,
         isSendRedPacket: Boolean,
         isIncome: Boolean,
-        isExpense: Boolean
+        isExpense: Boolean,
+        isRefund: Boolean = false
     ): String {
         return when {
+            isRefund -> "income"  // 退款是收入
             isSendRedPacket -> "expense"  // 发红包优先判断为支出
             isIncome && !isExpense -> "income"
             isExpense -> "expense"
@@ -235,8 +266,11 @@ object TransactionParser {
      * 判断分类
      */
     private fun determineCategory(text: String): String = when {
+        text.contains("退款") || text.contains("退回") -> "退款"
         text.contains("红包") -> "红包"
         text.contains("转账") -> "转账"
+        text.contains("自动扣款") || text.contains("自动续费") || text.contains("连续包月") -> "自动扣款"
+        text.contains("免密") -> "免密支付"
         else -> "其他"
     }
 
@@ -384,8 +418,9 @@ object TransactionParser {
         val hasIncomeKeyword = incomeKeywords.any { text.contains(it) }
         val hasExpenseKeyword = expenseKeywords.any { text.contains(it) }
         val isSendRedPacket = sendRedPacketKeywords.any { text.contains(it) }
+        val isRefund = refundKeywords.any { text.contains(it) }
 
-        if (!hasIncomeKeyword && !hasExpenseKeyword && !isSendRedPacket) {
+        if (!hasIncomeKeyword && !hasExpenseKeyword && !isSendRedPacket && !isRefund) {
             Logger.d(TAG) { "通知中未找到交易关键词" }
             return null
         }
@@ -404,9 +439,13 @@ object TransactionParser {
         }
 
         // 判断类型和分类
-        val type = determineType(text, isSendRedPacket, hasIncomeKeyword, hasExpenseKeyword)
+        val type = determineType(text, isSendRedPacket, hasIncomeKeyword, hasExpenseKeyword, isRefund)
         val category = determineCategory(text)
-        val merchant = if (isSendRedPacket) "发出红包" else "微信"
+        val merchant = when {
+            isRefund -> "退款"
+            isSendRedPacket -> "发出红包"
+            else -> "微信"
+        }
 
         return ExpenseEntity(
             id = 0,

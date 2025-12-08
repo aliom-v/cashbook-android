@@ -71,25 +71,8 @@ fun SettingsScreen(
         DataBackupManager(context, TransactionRepository.getInstance(context))
     }
 
-    // 检测无障碍服务状态 - 使用 key 触发重新检测
-    var refreshKey by remember { mutableStateOf(0) }
-    val isAccessibilityEnabled = remember(refreshKey) {
-        isAccessibilityServiceEnabled(context)
-    }
-    
-    // 监听生命周期，当页面重新可见时刷新状态
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                refreshKey++
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
+    // 使用可复用的 Hook 检测无障碍服务状态
+    val isAccessibilityEnabled = com.example.localexpense.util.rememberAccessibilityServiceState()
 
     LazyColumn(
         modifier = Modifier
@@ -183,11 +166,11 @@ fun SettingsScreen(
 
         // Accessibility section
         item {
-            // 监听状态 - 使用 refreshKey 触发刷新（从无障碍设置返回后自动更新）
-            var isMonitorEnabled by remember(refreshKey) {
+            // 监听状态 - 使用 isAccessibilityEnabled 作为 key 触发刷新（从无障碍设置返回后自动更新）
+            var isMonitorEnabled by remember(isAccessibilityEnabled) {
                 mutableStateOf(MonitorSettings.isMonitorEnabled(context))
             }
-            val monitorStartTime = remember(isMonitorEnabled, refreshKey) {
+            val monitorStartTime = remember(isMonitorEnabled, isAccessibilityEnabled) {
                 MonitorSettings.getFormattedStartTime(context)
             }
             // 显示提示对话框
@@ -904,13 +887,6 @@ private fun exportToCsv(context: Context, expenses: List<ExpenseEntity>) {
     } catch (e: Exception) {
         Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
     }
-}
-
-/**
- * 检测无障碍服务是否已启用
- */
-private fun isAccessibilityServiceEnabled(context: Context): Boolean {
-    return com.example.localexpense.util.AccessibilityUtils.isServiceEnabled(context)
 }
 
 /**

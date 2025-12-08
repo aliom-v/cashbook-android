@@ -32,6 +32,8 @@ object ErrorHandler {
         CRYPTO,         // 加解密错误
         VALIDATION,     // 输入验证错误
         PERMISSION,     // 权限错误
+        MEMORY,         // 内存不足
+        BACKUP,         // 备份/恢复错误
         UNKNOWN         // 未知错误
     }
 
@@ -122,6 +124,30 @@ object ErrorHandler {
                 isRetryable = false
             )
 
+            // 非法状态（通常是程序逻辑错误）
+            is IllegalStateException -> ErrorInfo(
+                type = ErrorType.UNKNOWN,
+                userMessage = "操作状态异常，请刷新后重试",
+                technicalMessage = "状态异常: ${throwable.message}",
+                isRetryable = true
+            )
+
+            // 空指针（通常是数据加载问题）
+            is NullPointerException -> ErrorInfo(
+                type = ErrorType.UNKNOWN,
+                userMessage = "数据加载失败，请刷新后重试",
+                technicalMessage = "空指针: ${throwable.message}",
+                isRetryable = true
+            )
+
+            // 数组越界
+            is IndexOutOfBoundsException -> ErrorInfo(
+                type = ErrorType.UNKNOWN,
+                userMessage = "数据处理错误，请刷新后重试",
+                technicalMessage = "索引越界: ${throwable.message}",
+                isRetryable = true
+            )
+
             // 权限错误
             is SecurityException -> ErrorInfo(
                 type = ErrorType.PERMISSION,
@@ -130,10 +156,78 @@ object ErrorHandler {
                 isRetryable = false
             )
 
-            // 其他错误
+            // 内存错误
+            is OutOfMemoryError -> ErrorInfo(
+                type = ErrorType.MEMORY,
+                userMessage = "内存不足，请关闭其他应用后重试",
+                technicalMessage = "内存溢出: ${throwable.message}",
+                isRetryable = false
+            )
+
+            // 其他错误 - 根据消息内容判断
+            else -> analyzeByMessage(throwable)
+        }
+    }
+
+    /**
+     * 根据错误消息内容分析错误类型
+     */
+    private fun analyzeByMessage(throwable: Throwable): ErrorInfo {
+        val message = throwable.message?.lowercase() ?: ""
+
+        return when {
+            // 备份相关错误
+            message.contains("备份") || message.contains("backup") -> ErrorInfo(
+                type = ErrorType.BACKUP,
+                userMessage = throwable.message ?: "备份操作失败",
+                technicalMessage = "${throwable::class.simpleName}: ${throwable.message}",
+                isRetryable = false
+            )
+
+            // 校验和错误
+            message.contains("校验") || message.contains("checksum") -> ErrorInfo(
+                type = ErrorType.BACKUP,
+                userMessage = "数据校验失败，文件可能已损坏",
+                technicalMessage = "校验失败: ${throwable.message}",
+                isRetryable = false
+            )
+
+            // 密码错误
+            message.contains("密码") || message.contains("password") -> ErrorInfo(
+                type = ErrorType.CRYPTO,
+                userMessage = throwable.message ?: "密码错误或不符合要求",
+                technicalMessage = "密码相关错误: ${throwable.message}",
+                isRetryable = false
+            )
+
+            // 存储空间不足
+            message.contains("no space") || message.contains("存储空间") -> ErrorInfo(
+                type = ErrorType.IO,
+                userMessage = "存储空间不足，请清理后重试",
+                technicalMessage = "存储空间不足: ${throwable.message}",
+                isRetryable = false
+            )
+
+            // 文件过大
+            message.contains("过大") || message.contains("too large") -> ErrorInfo(
+                type = ErrorType.IO,
+                userMessage = "文件过大，无法处理",
+                technicalMessage = "文件过大: ${throwable.message}",
+                isRetryable = false
+            )
+
+            // 版本不兼容
+            message.contains("版本") || message.contains("version") -> ErrorInfo(
+                type = ErrorType.VALIDATION,
+                userMessage = throwable.message ?: "版本不兼容，请更新应用",
+                technicalMessage = "版本错误: ${throwable.message}",
+                isRetryable = false
+            )
+
+            // 默认错误
             else -> ErrorInfo(
                 type = ErrorType.UNKNOWN,
-                userMessage = "发生未知错误，请稍后重试",
+                userMessage = "操作失败，请稍后重试",
                 technicalMessage = "${throwable::class.simpleName}: ${throwable.message}",
                 isRetryable = false
             )

@@ -37,6 +37,8 @@ import java.util.concurrent.atomic.AtomicLong
  * 4. 看门狗机制 - 检测 ANR 并恢复
  * 5. 内存优化 - 及时释放资源
  * 6. 限流保护 - 防止过度消耗资源
+ * 7. 自动恢复 - 服务异常时自动重启
+ * 8. 心跳检测 - 定期检查服务健康状态
  */
 class ExpenseAccessibilityService : AccessibilityService() {
 
@@ -50,6 +52,21 @@ class ExpenseAccessibilityService : AccessibilityService() {
         // 看门狗检查间隔
         private const val WATCHDOG_INTERVAL_MS = 30_000L
 
+        // 心跳检测间隔
+        private const val HEARTBEAT_INTERVAL_MS = 60_000L
+
+        // 最大连续异常次数（超过则重新初始化）
+        private const val MAX_CONSECUTIVE_ERRORS = 5
+
+        // 重新初始化冷却时间（毫秒）
+        private const val REINIT_COOLDOWN_MS = 60_000L
+
+        // 最大重新初始化尝试次数
+        private const val MAX_REINIT_ATTEMPTS = 3
+
+        // 文本收集超时时间（毫秒）
+        private const val TEXT_COLLECT_TIMEOUT_MS = 2000L
+
         // 服务状态（用于外部查询）
         @Volatile
         var isRunning = false
@@ -58,11 +75,54 @@ class ExpenseAccessibilityService : AccessibilityService() {
         @Volatile
         var lastEventTime = 0L
             private set
+
+        @Volatile
+        var lastHeartbeatTime = 0L
+            private set
+
+        /**
+         * 获取服务健康状态报告
+         */
+        fun getHealthReport(): ServiceHealthReport {
+            return ServiceHealthReport(
+                isRunning = isRunning,
+                lastEventTime = lastEventTime,
+                lastHeartbeatTime = lastHeartbeatTime,
+                timeSinceLastEvent = if (lastEventTime > 0) System.currentTimeMillis() - lastEventTime else -1,
+                timeSinceLastHeartbeat = if (lastHeartbeatTime > 0) System.currentTimeMillis() - lastHeartbeatTime else -1
+            )
+        }
+    }
+
+    /**
+     * 服务健康状态报告
+     */
+    data class ServiceHealthReport(
+        val isRunning: Boolean,
+        val lastEventTime: Long,
+        val lastHeartbeatTime: Long,
+        val timeSinceLastEvent: Long,
+        val timeSinceLastHeartbeat: Long
+    ) {
+        val isHealthy: Boolean
+            get() = isRunning && (timeSinceLastHeartbeat < HEARTBEAT_INTERVAL_MS * 2)
+
+        val statusMessage: String
+            get() = when {
+                !isRunning -> "服务未运行"
+                timeSinceLastHeartbeat > HEARTBEAT_INTERVAL_MS * 3 -> "服务可能已停止响应"
+                timeSinceLastHeartbeat > HEARTBEAT_INTERVAL_MS * 2 -> "服务响应较慢"
+                else -> "服务运行正常"
+            }
     }
 
     // 初始化状态
     private val isInitialized = AtomicBoolean(false)
     private val isDestroyed = AtomicBoolean(false)
+
+    // 重新初始化控制
+    private val reinitAttempts = AtomicInteger(0)
+    private val lastReinitTime = AtomicLong(0)
 
     // 核心组件（使用 lazy 延迟初始化，减少启动时间）
     private var repository: TransactionRepository? = null
@@ -81,6 +141,12 @@ class ExpenseAccessibilityService : AccessibilityService() {
     // 事件计数器（用于监控）
     private val eventCounter = AtomicInteger(0)
 
+    // 连续异常计数器
+    private val consecutiveErrors = AtomicInteger(0)
+
+    // 最后一次成功处理时间
+    private val lastSuccessTime = AtomicLong(System.currentTimeMillis())
+
     // 主线程 Handler
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -90,6 +156,9 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
     // 看门狗
     private var watchdogRunnable: Runnable? = null
+
+    // 心跳检测
+    private var heartbeatRunnable: Runnable? = null
 
     // ==================== 生命周期 ====================
 
@@ -122,7 +191,11 @@ class ExpenseAccessibilityService : AccessibilityService() {
             // 启动看门狗
             startWatchdog()
 
+            // 启动心跳检测
+            startHeartbeat()
+
             isRunning = true
+            lastHeartbeatTime = System.currentTimeMillis()
             Logger.i(TAG, "无障碍服务已连接")
 
         } catch (e: Exception) {
@@ -250,12 +323,46 @@ class ExpenseAccessibilityService : AccessibilityService() {
                 try {
                     // 检查服务状态
                     val eventCount = eventCounter.get()
-                    Logger.d(TAG) { "看门狗检查: 事件计数=$eventCount, 已初始化=${isInitialized.get()}" }
+                    val errors = consecutiveErrors.get()
+                    Logger.d(TAG) { "看门狗检查: 事件计数=$eventCount, 已初始化=${isInitialized.get()}, 连续错误=$errors" }
 
-                    // 检查是否需要重新初始化
-                    if (!isInitialized.get() && !isDestroyed.get()) {
-                        Logger.w(TAG, "检测到未初始化状态，尝试重新初始化")
-                        workerHandler?.post { initializeComponents() }
+                    // 检查是否需要重新初始化（带冷却时间保护）
+                    val now = System.currentTimeMillis()
+                    val shouldReinit = !isInitialized.get() || errors >= MAX_CONSECUTIVE_ERRORS
+
+                    if (shouldReinit && !isDestroyed.get()) {
+                        val timeSinceLastReinit = now - lastReinitTime.get()
+                        val attempts = reinitAttempts.get()
+
+                        if (attempts >= MAX_REINIT_ATTEMPTS) {
+                            // 达到最大尝试次数，等待更长的冷却时间
+                            if (timeSinceLastReinit > REINIT_COOLDOWN_MS * 5) {
+                                Logger.w(TAG, "重置重新初始化计数器")
+                                reinitAttempts.set(0)
+                            } else {
+                                Logger.w(TAG, "已达最大重新初始化次数($attempts)，等待冷却")
+                            }
+                        } else if (timeSinceLastReinit > REINIT_COOLDOWN_MS) {
+                            Logger.w(TAG, "尝试重新初始化 (第${attempts + 1}次)")
+                            lastReinitTime.set(now)
+                            reinitAttempts.incrementAndGet()
+                            consecutiveErrors.set(0)
+                            workerHandler?.post { reinitializeComponents() }
+                        } else {
+                            Logger.d(TAG) { "等待冷却时间: ${(REINIT_COOLDOWN_MS - timeSinceLastReinit) / 1000}秒" }
+                        }
+                    }
+
+                    // 检查是否长时间没有成功处理
+                    val timeSinceLastSuccess = now - lastSuccessTime.get()
+                    if (timeSinceLastSuccess > 5 * 60 * 1000 && isInitialized.get()) {
+                        Logger.w(TAG, "长时间无成功处理(${timeSinceLastSuccess/1000}秒)，检查服务状态")
+                        // 重置规则引擎
+                        try {
+                            RuleEngine.init(applicationContext)
+                        } catch (e: Exception) {
+                            Logger.e(TAG, "重新初始化规则引擎失败", e)
+                        }
                     }
 
                 } catch (e: Exception) {
@@ -269,6 +376,76 @@ class ExpenseAccessibilityService : AccessibilityService() {
             }
         }
         mainHandler.postDelayed(watchdogRunnable!!, WATCHDOG_INTERVAL_MS)
+    }
+
+    /**
+     * 启动心跳检测
+     */
+    private fun startHeartbeat() {
+        heartbeatRunnable = object : Runnable {
+            override fun run() {
+                if (isDestroyed.get()) return
+
+                try {
+                    lastHeartbeatTime = System.currentTimeMillis()
+                    Logger.d(TAG) { "心跳检测: 服务正常运行中" }
+
+                    // 检查关键组件状态
+                    if (repository == null && isInitialized.get()) {
+                        Logger.w(TAG, "检测到 Repository 为空，尝试恢复")
+                        repository = TransactionRepository.getInstance(applicationContext)
+                    }
+
+                    // 检查事件处理延迟
+                    val timeSinceLastEvent = System.currentTimeMillis() - lastEventTime
+                    if (lastEventTime > 0 && timeSinceLastEvent > 5 * 60 * 1000) {
+                        // 超过5分钟没有事件，可能需要检查
+                        Logger.d(TAG) { "长时间未收到事件 (${timeSinceLastEvent / 1000}秒)" }
+                    }
+
+                    // 检查规则引擎状态
+                    if (!RuleEngine.isInitialized()) {
+                        Logger.w(TAG, "规则引擎未初始化，尝试重新初始化")
+                        try {
+                            RuleEngine.init(applicationContext)
+                        } catch (e: Exception) {
+                            Logger.e(TAG, "规则引擎重新初始化失败", e)
+                        }
+                    }
+
+                    // 注意：移除 System.gc() 调用，依赖系统自动GC管理
+                    // 频繁调用 GC 会导致性能问题和电量消耗
+
+                } catch (e: Exception) {
+                    Logger.e(TAG, "心跳检测异常", e)
+                }
+
+                // 继续下一次检查
+                if (!isDestroyed.get()) {
+                    mainHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
+                }
+            }
+        }
+        mainHandler.postDelayed(heartbeatRunnable!!, HEARTBEAT_INTERVAL_MS)
+    }
+
+    /**
+     * 重新初始化组件（用于恢复异常状态）
+     */
+    private fun reinitializeComponents() {
+        Logger.i(TAG, "开始重新初始化组件")
+        try {
+            // 清理旧资源
+            repository = null
+
+            // 重新初始化
+            initializeComponents()
+
+            Logger.i(TAG, "重新初始化完成")
+        } catch (e: Exception) {
+            Logger.e(TAG, "重新初始化失败", e)
+            CrashReporter.logException(e, TAG)
+        }
     }
 
     // ==================== 事件处理 ====================
@@ -333,7 +510,17 @@ class ExpenseAccessibilityService : AccessibilityService() {
         var root: AccessibilityNodeInfo? = null
 
         try {
-            root = rootInActiveWindow ?: return
+            // 添加空值检查
+            if (isDestroyed.get()) return
+
+            root = try {
+                rootInActiveWindow
+            } catch (e: Exception) {
+                Logger.w(TAG, "获取根节点失败: ${e.message}")
+                null
+            }
+
+            if (root == null) return
 
             // 快速检查
             if (!quickCheckForTransaction(root)) {
@@ -345,10 +532,18 @@ class ExpenseAccessibilityService : AccessibilityService() {
             if (texts.isEmpty()) return
 
             // 解析交易
-            val transaction = TransactionParser.parse(texts, pkg)
+            val transaction = try {
+                TransactionParser.parse(texts, pkg)
+            } catch (e: Exception) {
+                Logger.e(TAG, "解析交易异常", e)
+                null
+            }
 
             if (transaction != null) {
                 handleTransactionFound(transaction)
+                // 重置错误计数，更新成功时间
+                consecutiveErrors.set(0)
+                lastSuccessTime.set(System.currentTimeMillis())
             } else {
                 // OCR 备用方案
                 tryOcrFallbackSafely(pkg)
@@ -356,6 +551,7 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
         } catch (e: Exception) {
             Logger.e(TAG, "处理窗口事件异常", e)
+            consecutiveErrors.incrementAndGet()
         } finally {
             recycleNodeSafely(root)
         }
@@ -384,8 +580,14 @@ class ExpenseAccessibilityService : AccessibilityService() {
      * 处理找到的交易
      */
     private fun handleTransactionFound(transaction: ExpenseEntity) {
-        // 防重复
-        if (!duplicateChecker.shouldProcess(transaction.amount, transaction.merchant, transaction.type)) {
+        // 防重复（使用渠道信息和原始文本进行差异化去重）
+        if (!duplicateChecker.shouldProcess(
+                transaction.amount,
+                transaction.merchant,
+                transaction.type,
+                transaction.channel,
+                transaction.rawText
+            )) {
             return
         }
 
@@ -559,22 +761,45 @@ class ExpenseAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 收集所有文本
+     * 收集所有文本（带超时保护）
      */
     private fun collectAllText(node: AccessibilityNodeInfo): List<String> {
         val result = mutableListOf<String>()
+        val startTime = System.currentTimeMillis()
+
         try {
-            collectTextRecursive(node, result, 0)
+            collectTextRecursiveWithTimeout(node, result, 0, startTime)
         } catch (e: Exception) {
             Logger.e(TAG, "收集文本异常", e)
         }
+
         return result
     }
 
-    private fun collectTextRecursive(node: AccessibilityNodeInfo?, list: MutableList<String>, depth: Int) {
+    private fun collectTextRecursiveWithTimeout(
+        node: AccessibilityNodeInfo?,
+        list: MutableList<String>,
+        depth: Int,
+        startTime: Long
+    ) {
         if (node == null) return
         if (depth > Constants.MAX_NODE_COLLECT_DEPTH) return
         if (list.size >= Constants.MAX_COLLECTED_TEXT_COUNT) return
+
+        // 超时检查
+        if (System.currentTimeMillis() - startTime > TEXT_COLLECT_TIMEOUT_MS) {
+            Logger.w(TAG, "文本收集超时，已收集 ${list.size} 条")
+            return
+        }
+
+        // 内存压力检查（提前触发，避免OOM）
+        val runtime = Runtime.getRuntime()
+        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+        val maxMemory = runtime.maxMemory()
+        if (usedMemory > maxMemory * 0.75) {  // 75%阈值，提前响应
+            Logger.w(TAG, "内存压力过大(${usedMemory * 100 / maxMemory}%)，停止收集")
+            return
+        }
 
         try {
             node.text?.toString()?.trim()?.takeIf {
@@ -589,10 +814,15 @@ class ExpenseAccessibilityService : AccessibilityService() {
             for (i in 0 until childCount) {
                 if (list.size >= Constants.MAX_COLLECTED_TEXT_COUNT) break
 
+                // 再次检查超时
+                if (System.currentTimeMillis() - startTime > TEXT_COLLECT_TIMEOUT_MS) {
+                    break
+                }
+
                 var child: AccessibilityNodeInfo? = null
                 try {
                     child = node.getChild(i)
-                    collectTextRecursive(child, list, depth + 1)
+                    collectTextRecursiveWithTimeout(child, list, depth + 1, startTime)
                 } finally {
                     recycleNodeSafely(child)
                 }
@@ -654,6 +884,10 @@ class ExpenseAccessibilityService : AccessibilityService() {
         // 停止看门狗
         watchdogRunnable?.let { mainHandler.removeCallbacks(it) }
         watchdogRunnable = null
+
+        // 停止心跳检测
+        heartbeatRunnable?.let { mainHandler.removeCallbacks(it) }
+        heartbeatRunnable = null
 
         // 清理悬浮窗
         try {

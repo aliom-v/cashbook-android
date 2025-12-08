@@ -39,6 +39,7 @@ enum class Screen { HOME, STATS, CALENDAR, SETTINGS }
 @Composable
 fun MainScreen(
     state: UiState,
+    onIntent: (UserIntent) -> Unit,
     onAddExpense: (ExpenseEntity) -> Unit,
     onDeleteExpense: (ExpenseEntity) -> Unit,
     onSearch: (String) -> Unit,
@@ -55,30 +56,9 @@ fun MainScreen(
     onClearError: () -> Unit = {}
 ) {
     var currentScreen by remember { mutableStateOf(Screen.HOME) }
-    var showAddDialog by remember { mutableStateOf(false) }
-    var editExpense by remember { mutableStateOf<ExpenseEntity?>(null) }
-    var showSearchBar by remember { mutableStateOf(false) }
-    
-    // 检测无障碍服务状态
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var accessibilityRefreshKey by remember { mutableStateOf(0) }
-    val isAccessibilityEnabled = remember(accessibilityRefreshKey) {
-        com.example.localexpense.util.AccessibilityUtils.isServiceEnabled(context)
-    }
-    
-    // 监听生命周期，当页面重新可见时刷新无障碍状态
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                accessibilityRefreshKey++
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
+
+    // 使用可复用的 Hook 检测无障碍服务状态
+    val isAccessibilityEnabled = com.example.localexpense.util.rememberAccessibilityServiceState()
 
     // Snackbar 状态用于错误提示
     val snackbarHostState = remember { SnackbarHostState() }
@@ -102,7 +82,7 @@ fun MainScreen(
                     TopAppBar(
                         title = { Text("本地记账", fontWeight = FontWeight.Bold) },
                         actions = {
-                            IconButton(onClick = { showSearchBar = !showSearchBar }) {
+                            IconButton(onClick = { onIntent(UserIntent.ToggleSearchBar) }) {
                                 Icon(Icons.Default.Search, "搜索")
                             }
                         },
@@ -168,7 +148,7 @@ fun MainScreen(
         floatingActionButton = {
             if (currentScreen == Screen.HOME) {
                 FloatingActionButton(
-                    onClick = { showAddDialog = true },
+                    onClick = { onIntent(UserIntent.ShowAddDialog) },
                     containerColor = MaterialTheme.colorScheme.primary
                 ) {
                     Icon(Icons.Default.Add, "添加账单")
@@ -181,12 +161,8 @@ fun MainScreen(
                 Screen.HOME -> {
                     HomeContent(
                         state = state,
-                        showSearchBar = showSearchBar,
+                        onIntent = onIntent,
                         onSearch = onSearch,
-                        onExpenseClick = { expense ->
-                            editExpense = expense
-                            showAddDialog = true
-                        },
                         onDeleteExpense = onDeleteExpense,
                         isAccessibilityEnabled = isAccessibilityEnabled,
                         onOpenAccessibility = onOpenAccessibility
@@ -223,8 +199,7 @@ fun MainScreen(
                         onDateSelect = onSelectCalendarDate,
                         onMonthChange = onCalendarMonthChange,
                         onExpenseClick = { expense ->
-                            editExpense = expense
-                            showAddDialog = true
+                            onIntent(UserIntent.ShowEditDialog(expense))
                         }
                     )
                 }
@@ -245,16 +220,13 @@ fun MainScreen(
         }
     }
 
-    // Add/Edit dialog
-    if (showAddDialog) {
+    // Add/Edit dialog - 使用 ViewModel 管理的状态
+    if (state.showAddDialog) {
         AddExpenseDialog(
             categories = state.categories,
-            onDismiss = {
-                showAddDialog = false
-                editExpense = null
-            },
+            onDismiss = { onIntent(UserIntent.DismissDialog) },
             onSave = onAddExpense,
-            editExpense = editExpense
+            editExpense = state.editingExpense
         )
     }
 }
@@ -262,20 +234,16 @@ fun MainScreen(
 @Composable
 private fun HomeContent(
     state: UiState,
-    showSearchBar: Boolean,
+    onIntent: (UserIntent) -> Unit,
     onSearch: (String) -> Unit,
-    onExpenseClick: (ExpenseEntity) -> Unit,
     onDeleteExpense: (ExpenseEntity) -> Unit,
     isAccessibilityEnabled: Boolean,
     onOpenAccessibility: () -> Unit
 ) {
-    // 搜索类型筛选状态
-    var searchTypeFilter by remember { mutableStateOf<String?>(null) } // null = 全部, "expense", "income"
-
     Column(modifier = Modifier.fillMaxSize()) {
-        // Search bar
+        // Search bar - 使用 ViewModel 管理的状态
         AnimatedVisibility(
-            visible = showSearchBar,
+            visible = state.showSearchBar,
             enter = expandVertically() + fadeIn(),
             exit = shrinkVertically() + fadeOut()
         ) {
@@ -299,7 +267,7 @@ private fun HomeContent(
                     shape = RoundedCornerShape(12.dp)
                 )
 
-                // 类型筛选
+                // 类型筛选 - 使用 ViewModel 管理的状态
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -307,26 +275,26 @@ private fun HomeContent(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     FilterChip(
-                        selected = searchTypeFilter == null,
-                        onClick = { searchTypeFilter = null },
+                        selected = state.searchTypeFilter == null,
+                        onClick = { onIntent(UserIntent.SetSearchTypeFilter(null)) },
                         label = { Text("全部") },
-                        leadingIcon = if (searchTypeFilter == null) {
+                        leadingIcon = if (state.searchTypeFilter == null) {
                             { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
                         } else null
                     )
                     FilterChip(
-                        selected = searchTypeFilter == "expense",
-                        onClick = { searchTypeFilter = "expense" },
+                        selected = state.searchTypeFilter == "expense",
+                        onClick = { onIntent(UserIntent.SetSearchTypeFilter("expense")) },
                         label = { Text("支出") },
-                        leadingIcon = if (searchTypeFilter == "expense") {
+                        leadingIcon = if (state.searchTypeFilter == "expense") {
                             { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
                         } else null
                     )
                     FilterChip(
-                        selected = searchTypeFilter == "income",
-                        onClick = { searchTypeFilter = "income" },
+                        selected = state.searchTypeFilter == "income",
+                        onClick = { onIntent(UserIntent.SetSearchTypeFilter("income")) },
                         label = { Text("收入") },
-                        leadingIcon = if (searchTypeFilter == "income") {
+                        leadingIcon = if (state.searchTypeFilter == "income") {
                             { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
                         } else null
                     )
@@ -349,18 +317,18 @@ private fun HomeContent(
 
         // Show search results or normal content
         if (state.searchQuery.isNotEmpty()) {
-            // 应用类型筛选
-            val filteredResults = remember(state.searchResults, searchTypeFilter) {
-                if (searchTypeFilter == null) {
+            // 应用类型筛选 - 使用 ViewModel 管理的状态
+            val filteredResults = remember(state.searchResults, state.searchTypeFilter) {
+                if (state.searchTypeFilter == null) {
                     state.searchResults
                 } else {
-                    state.searchResults.filter { it.type == searchTypeFilter }
+                    state.searchResults.filter { it.type == state.searchTypeFilter }
                 }
             }
 
             SearchResults(
                 results = filteredResults,
-                onExpenseClick = onExpenseClick,
+                onExpenseClick = { expense -> onIntent(UserIntent.ShowEditDialog(expense)) },
                 onDeleteExpense = onDeleteExpense
             )
         } else {
@@ -368,7 +336,7 @@ private fun HomeContent(
             if (!isAccessibilityEnabled) {
                 AccessibilityTipCard(onOpenAccessibility = onOpenAccessibility)
             }
-            
+
             // Summary card
             SummaryCard(
                 expense = state.monthlyExpense,
@@ -383,8 +351,8 @@ private fun HomeContent(
                 EmptyState()
             } else {
                 ExpenseList(
-                    expenses = state.expenses,
-                    onExpenseClick = onExpenseClick,
+                    groupedExpenses = state.groupedExpenses,
+                    onExpenseClick = { expense -> onIntent(UserIntent.ShowEditDialog(expense)) },
                     onDeleteExpense = onDeleteExpense
                 )
             }
@@ -568,14 +536,22 @@ private fun EmptyState() {
 
 @Composable
 private fun ExpenseList(
-    expenses: List<ExpenseEntity>,
+    groupedExpenses: Map<String, List<ExpenseEntity>>,
     onExpenseClick: (ExpenseEntity) -> Unit,
     onDeleteExpense: (ExpenseEntity) -> Unit
 ) {
-    // 使用 remember 缓存分组结果，只有当 expenses 变化时才重新计算
-    // 使用 DateUtils 确保线程安全
-    val groupedExpenses = remember(expenses) {
-        expenses.groupBy { DateUtils.formatDate(it.timestamp) }
+    // 预计算日期列表，避免在滚动时重复计算
+    val dateList = remember(groupedExpenses) {
+        groupedExpenses.keys.toList()
+    }
+
+    // 预计算每日统计（在Composable上下文中）
+    val dailyStats = remember(groupedExpenses) {
+        groupedExpenses.mapValues { (_, expenses) ->
+            val expense = expenses.filter { it.type == "expense" }.sumOf { it.amount }
+            val income = expenses.filter { it.type == "income" }.sumOf { it.amount }
+            expense to income
+        }
     }
 
     LazyColumn(
@@ -583,12 +559,13 @@ private fun ExpenseList(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        groupedExpenses.forEach { (date, dayExpenses) ->
+        dateList.forEach { date ->
+            val dayExpenses = groupedExpenses[date] ?: return@forEach
+            val (dayExpenseTotal, dayIncomeTotal) = dailyStats[date] ?: (0.0 to 0.0)
+
             // 日期头部项，使用 date 作为 key，contentType 区分不同类型的项
             item(key = "header_$date", contentType = "header") {
-                val displayDate = DateUtils.formatDisplayDate(date)
-                val dayExpenseTotal = dayExpenses.filter { it.type == "expense" }.sumOf { it.amount }
-                val dayIncomeTotal = dayExpenses.filter { it.type == "income" }.sumOf { it.amount }
+                val displayDate = remember(date) { DateUtils.formatDisplayDate(date) }
 
                 Row(
                     modifier = Modifier

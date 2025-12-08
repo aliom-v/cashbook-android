@@ -79,12 +79,19 @@ object RetryUtils {
     /**
      * 带重试的操作执行器（同步版本，用于非协程环境）
      *
+     * 警告：此方法使用 Thread.sleep() 会阻塞当前线程
+     * 请优先使用 withRetry() 挂起函数版本
+     *
      * @param maxRetries 最大重试次数
      * @param initialDelayMs 首次重试前的延迟
      * @param shouldRetry 判断是否应该重试的函数
      * @param block 要执行的操作
      * @return 操作结果
      */
+    @Deprecated(
+        message = "请使用 withRetry() 挂起函数版本，此方法会阻塞线程",
+        replaceWith = ReplaceWith("withRetry(maxRetries, initialDelayMs, maxDelayMs, backoffMultiplier, shouldRetry) { block() }")
+    )
     fun <T> withRetryBlocking(
         maxRetries: Int = Defaults.MAX_RETRIES,
         initialDelayMs: Long = Defaults.INITIAL_DELAY_MS,

@@ -25,6 +25,7 @@ class MainActivity : ComponentActivity() {
             LocalExpenseTheme {
                 MainScreen(
                     state = state,
+                    onIntent = { vm.handleIntent(it) },
                     onAddExpense = { vm.handleIntent(UserIntent.AddExpense(it)) },
                     onDeleteExpense = { vm.handleIntent(UserIntent.DeleteExpense(it)) },
                     onSearch = { vm.handleIntent(UserIntent.Search(it)) },

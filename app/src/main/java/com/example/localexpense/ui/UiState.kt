@@ -42,6 +42,12 @@ data class MainUiState(
     val searchQuery: String = "",
     val searchResults: List<ExpenseEntity> = emptyList(),
     val isSearching: Boolean = false,
+    val showSearchBar: Boolean = false,
+    val searchTypeFilter: String? = null, // null = 全部, "expense", "income"
+
+    // 对话框状态
+    val showAddDialog: Boolean = false,
+    val editingExpense: ExpenseEntity? = null,
 
     // 日历状态
     val selectedCalendarDate: String = DateUtils.getTodayString(),
@@ -75,9 +81,9 @@ data class MainUiState(
         else -> null
     }
 
-    // 显示用的交易列表（考虑筛选）
+    // 显示用的交易列表（考虑筛选，筛选结果为空时返回空列表）
     val displayExpenses: List<ExpenseEntity>
-        get() = if (isFiltering && filteredExpenses.isNotEmpty()) filteredExpenses else expenses
+        get() = if (isFiltering) filteredExpenses else expenses
 
     // 筛选结果统计
     val filterSummary: String?
@@ -88,11 +94,19 @@ data class MainUiState(
     val statsDate: Long get() = statsDateMillis
     val calendarMonth: Long get() = calendarMonthMillis
 
-    // 预算使用率
+    // 预算使用率（允许超过100%以显示超支情况）
     val budgetUsagePercent: Float
         get() = budget?.let {
-            if (it.amount > 0) (monthlyExpense / it.amount * 100).toFloat().coerceIn(0f, 100f) else 0f
+            if (it.amount > 0) (monthlyExpense / it.amount * 100).toFloat().coerceAtLeast(0f) else 0f
         } ?: 0f
+
+    // 预算使用率（用于进度条显示，限制在100%以内）
+    val budgetProgressPercent: Float
+        get() = budgetUsagePercent.coerceAtMost(100f)
+
+    // 是否超支
+    val isOverBudget: Boolean
+        get() = budget?.let { monthlyExpense > it.amount } ?: false
 
     // 预算剩余
     val budgetRemaining: Double
@@ -147,9 +161,16 @@ sealed class UserIntent {
     data class UpdateExpense(val expense: ExpenseEntity) : UserIntent()
     data class DeleteExpense(val expense: ExpenseEntity) : UserIntent()
 
+    // 对话框操作
+    object ShowAddDialog : UserIntent()
+    data class ShowEditDialog(val expense: ExpenseEntity) : UserIntent()
+    object DismissDialog : UserIntent()
+
     // 搜索
     data class Search(val query: String) : UserIntent()
     object ClearSearch : UserIntent()
+    object ToggleSearchBar : UserIntent()
+    data class SetSearchTypeFilter(val type: String?) : UserIntent()
 
     // 日历
     data class SelectCalendarDate(val date: String) : UserIntent()

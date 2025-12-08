@@ -186,15 +186,22 @@ object RuleEngine {
      * @return 匹配的规则 + 提取的数据
      */
     fun match(texts: List<String>, packageName: String): MatchResult? {
+        // 快速检查：如果文本为空，直接返回
+        if (texts.isEmpty()) return null
+
         // 同步读取规则，防止读取到部分初始化的数据
         val rules = synchronized(rulesLock) {
             appRules[packageName]
         } ?: return null
+
+        // 快速检查：如果规则为空，直接返回
+        if (rules.isEmpty()) return null
+
         val joinedText = texts.joinToString(" | ")
 
         // 遍历规则（按优先级从高到低）
         for (rule in rules) {
-            // 1. 检查是否包含触发关键词
+            // 1. 快速检查是否包含触发关键词（使用 any 短路求值）
             val hasTriggerKeyword = rule.triggerKeywords.any { joinedText.contains(it) }
             if (!hasTriggerKeyword) {
                 continue
@@ -213,7 +220,8 @@ object RuleEngine {
             //     continue
             // }
 
-            // 3. 提取金额
+            // 3. 提取金额（提前检查规则是否有有效的金额模式）
+            if (rule.amountPatterns.isEmpty()) continue
             val amount = extractAmount(texts, rule.amountPatterns) ?: continue
 
             // 4. 提取商户（如果规则定义了）

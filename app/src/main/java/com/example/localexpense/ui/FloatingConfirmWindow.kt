@@ -100,6 +100,7 @@ class FloatingConfirmWindow(context: Context) {
     // 倒计时显示
     private var countdownSeconds = (AUTO_DISMISS_DELAY_MS / 1000).toInt()
     private var countdownTextView: TextView? = null
+    private var showStartTime = 0L  // 显示开始时间，用于精确计算倒计时
 
     // 自动消失时默认确认保存交易
     private val autoDismissRunnable = Runnable {
@@ -127,15 +128,19 @@ class FloatingConfirmWindow(context: Context) {
         dismissWithAnimation()
     }
 
-    // 倒计时更新
+    // 倒计时更新（使用绝对时间计算，避免累计误差）
     private val countdownRunnable = object : Runnable {
         override fun run() {
             if (!isShowing || isServiceDestroyed) return
 
-            countdownSeconds--
-            if (countdownSeconds > 0) {
-                countdownTextView?.text = "${countdownSeconds}秒后自动记录"
-                handler.postDelayed(this, 1000)
+            val elapsed = System.currentTimeMillis() - showStartTime
+            val remaining = ((AUTO_DISMISS_DELAY_MS - elapsed) / 1000).toInt().coerceAtLeast(0)
+
+            if (remaining > 0) {
+                countdownTextView?.text = "${remaining}秒后自动记录"
+                handler.postDelayed(this, 500)  // 更频繁更新以提高精度
+            } else {
+                countdownTextView?.text = "正在记录..."
             }
         }
     }
@@ -236,6 +241,7 @@ class FloatingConfirmWindow(context: Context) {
             try {
                 windowManager.addView(floatingView, params)
                 isShowing = true
+                showStartTime = System.currentTimeMillis()  // 记录显示开始时间
 
                 // 显示动画
                 playShowAnimation()
@@ -244,7 +250,7 @@ class FloatingConfirmWindow(context: Context) {
                 handler.postDelayed(autoDismissRunnable, AUTO_DISMISS_DELAY_MS)
 
                 // 倒计时更新
-                handler.postDelayed(countdownRunnable, 1000)
+                handler.postDelayed(countdownRunnable, 500)
 
                 Logger.d(TAG) { "悬浮窗显示成功" }
             } catch (e: Exception) {
@@ -312,10 +318,17 @@ class FloatingConfirmWindow(context: Context) {
         val view = floatingView
         if (view == null) {
             isShowing = false
+            isAnimating = false
             return
         }
 
-        if (animate && !isServiceDestroyed) {
+        // 先清理回调引用，防止动画过程中被调用
+        val savedOnConfirm = onConfirm
+        val savedOnDismiss = onDismiss
+        onConfirm = null
+        onDismiss = null
+
+        if (animate && !isServiceDestroyed && view.isAttachedToWindow) {
             // 播放消失动画
             isAnimating = true
             dismissAnimator = ObjectAnimator.ofFloat(view, "alpha", 1f, 0f).apply {
@@ -324,6 +337,12 @@ class FloatingConfirmWindow(context: Context) {
                 addListener(object : AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: Animator) {
                         isAnimating = false
+                        isShowing = false
+                        removeViewSafely(view)
+                    }
+                    override fun onAnimationCancel(animation: Animator) {
+                        isAnimating = false
+                        isShowing = false
                         removeViewSafely(view)
                     }
                 })
@@ -331,17 +350,14 @@ class FloatingConfirmWindow(context: Context) {
             }
         } else {
             // 直接移除
+            isShowing = false
+            isAnimating = false
             removeViewSafely(view)
         }
 
         floatingView = null
         pendingTransaction = null
         countdownTextView = null
-        isShowing = false
-
-        // 清理回调引用
-        onConfirm = null
-        onDismiss = null
     }
 
     /**

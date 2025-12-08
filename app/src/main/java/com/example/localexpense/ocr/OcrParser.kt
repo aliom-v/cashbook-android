@@ -290,6 +290,7 @@ object OcrParser {
 
     /**
      * 处理 OCR 识别失败
+     * 注意：不再支持重试机制，因为bitmap可能在回调后被回收
      */
     private fun handleOcrFailure(
         error: Exception,
@@ -300,29 +301,11 @@ object OcrParser {
     ) {
         Logger.e(TAG, "OCR 识别失败: ${error.message}")
 
-        // 判断是否需要重试
-        if (retryCount < MAX_RETRY_COUNT && shouldRetry(error)) {
-            Logger.i(TAG, "OCR 重试 (${retryCount + 1}/$MAX_RETRY_COUNT)")
-            // 延迟重试
-            mainHandler.postDelayed({
-                parseFromBitmapInternal(bitmap, packageName, callback, retryCount + 1)
-            }, 500)
-        } else {
-            failureCount.incrementAndGet()
-            PerformanceMonitor.increment(PerformanceMonitor.Counters.PARSE_FAILURES)
-            callback(null)
-        }
-    }
-
-    /**
-     * 判断是否应该重试
-     */
-    private fun shouldRetry(error: Exception): Boolean {
-        val message = error.message ?: return false
-        // 临时性错误可以重试
-        return message.contains("busy", ignoreCase = true) ||
-                message.contains("temporary", ignoreCase = true) ||
-                message.contains("timeout", ignoreCase = true)
+        // 注意：移除重试机制，因为bitmap在回调后可能被调用方回收
+        // 如果确实需要重试，调用方应该自己处理
+        failureCount.incrementAndGet()
+        PerformanceMonitor.increment(PerformanceMonitor.Counters.PARSE_FAILURES)
+        callback(null)
     }
 
     /**
@@ -369,6 +352,9 @@ object OcrParser {
                 isPermanentlyReleased = true
             }
             try {
+                // 清理所有待处理的Handler回调，防止内存泄漏
+                mainHandler.removeCallbacksAndMessages(null)
+
                 _recognizer?.close()
                 _recognizer = null
                 Logger.d(TAG) { "OCR 识别器已释放 (permanent=$permanent)" }
@@ -382,6 +368,17 @@ object OcrParser {
                     isReleasing = false
                 }
             }
+        }
+    }
+
+    /**
+     * 重置永久释放状态（仅用于服务重新启动）
+     */
+    fun reset() {
+        synchronized(recognizerLock) {
+            isPermanentlyReleased = false
+            isReleasing = false
+            Logger.d(TAG) { "OCR 状态已重置" }
         }
     }
 

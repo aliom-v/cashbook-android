@@ -8,9 +8,12 @@ import java.math.RoundingMode
  */
 object Constants {
     // 防重复检测时间间隔（毫秒）
-    // 设置为5秒，平衡误过滤和重复记录的风险
+    // 增加到15秒，因为支付宝等应用会多次触发页面刷新
     // 注意：实际判断使用 金额+商户+类型 组合，所以相同金额但不同商户不会被过滤
-    const val DUPLICATE_CHECK_INTERVAL_MS = 5000L
+    const val DUPLICATE_CHECK_INTERVAL_MS = 15000L
+
+    // 支付宝专用的去重时间窗口（更长，因为支付宝页面刷新频繁）
+    const val ALIPAY_DUPLICATE_CHECK_INTERVAL_MS = 30000L
 
     // 原始文本最大长度
     const val RAW_TEXT_MAX_LENGTH = 300
@@ -61,8 +64,8 @@ object Constants {
     const val DATABASE_NAME = "local_expense.db"
 
     // 需要过滤的特殊号码（运营商客服、银行等）
-    // 注意：只过滤明显不可能是消费金额的数字
-    // 移除了 400.0、800.0、110.0、120.0 等可能是真实消费的金额
+    // 注意：只过滤明显不可能是消费金额的数字（5位以上客服号码）
+    // 移除了可能是真实消费的金额（如12306铁路订票）
     val BLACKLIST_AMOUNTS = setOf(
         // 运营商客服号码（5位数，不可能是消费金额）
         10086.0,  // 中国移动
@@ -86,12 +89,9 @@ object Constants {
         95526.0,  // 华夏银行
         95577.0,  // 华夏银行（新）
         95580.0,  // 邮储银行
-        // 公共服务号码（5位数）
-        12315.0,  // 消费者投诉
-        12306.0,  // 铁路客服
-        12345.0,  // 政务服务
         // 常见误识别（6位数密码提示）
         123456.0  // 可能是密码提示
+        // 注意：移除了 12306、12315、12345 等可能是真实消费金额的值
     )
 }
 

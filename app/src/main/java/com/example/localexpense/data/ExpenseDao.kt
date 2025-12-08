@@ -34,6 +34,19 @@ interface ExpenseDao {
     @Query("SELECT SUM(amount) FROM expense WHERE type = 'income' AND timestamp BETWEEN :start AND :end")
     fun getTotalIncome(start: Long, end: Long): Flow<Double?>
 
+    /**
+     * 一次查询获取收支总额（优化性能）
+     * 比分开查询 getTotalExpense + getTotalIncome 更高效
+     */
+    @Query("""
+        SELECT
+            COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as totalExpense,
+            COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as totalIncome
+        FROM expense
+        WHERE timestamp BETWEEN :start AND :end
+    """)
+    fun getTotalExpenseAndIncome(start: Long, end: Long): Flow<ExpenseIncomeStat>
+
     @Query("SELECT category, SUM(amount) as total FROM expense WHERE type = :type AND timestamp BETWEEN :start AND :end GROUP BY category")
     fun getCategoryStats(type: String, start: Long, end: Long): Flow<List<CategoryStat>>
 
@@ -49,6 +62,10 @@ interface ExpenseDao {
 
     @Query("DELETE FROM expense")
     suspend fun deleteAll()
+
+    // 根据ID删除单条记录
+    @Query("DELETE FROM expense WHERE id = :id")
+    suspend fun deleteById(id: Long): Int
 
     // 删除指定时间之前的数据
     @Query("DELETE FROM expense WHERE timestamp < :beforeTimestamp")
@@ -72,3 +89,13 @@ data class DailyStat(
     val date: String,
     val total: Double
 )
+
+/**
+ * 收支统计结果（用于合并查询）
+ */
+data class ExpenseIncomeStat(
+    val totalExpense: Double,
+    val totalIncome: Double
+) {
+    val balance: Double get() = totalIncome - totalExpense
+}

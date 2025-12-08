@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -31,10 +32,11 @@ data class BackupData(
     val timestamp: Long = System.currentTimeMillis(),
     val expenses: List<ExpenseEntity>,
     val categories: List<CategoryEntity>,
-    val budgets: List<BudgetEntity>
+    val budgets: List<BudgetEntity>,
+    val checksum: String = ""  // 数据完整性校验
 ) {
     companion object {
-        const val BACKUP_VERSION = 1
+        const val BACKUP_VERSION = 2  // 版本升级，支持校验和
     }
 }
 
@@ -60,6 +62,75 @@ class DataBackupManager(
         private const val PBKDF2_ITERATIONS = 100000
         private const val SALT_LENGTH = 16
         private const val ENCRYPTED_PREFIX = "ENCRYPTED:"
+
+        // 密码强度要求
+        private const val MIN_PASSWORD_LENGTH = 6
+    }
+
+    /**
+     * 验证密码强度
+     */
+    private fun validatePassword(password: String) {
+        if (password.length < MIN_PASSWORD_LENGTH) {
+            throw IllegalArgumentException("密码长度至少需要${MIN_PASSWORD_LENGTH}位")
+        }
+        // 检查是否包含数字
+        if (!password.any { it.isDigit() }) {
+            throw IllegalArgumentException("密码需要包含至少一个数字")
+        }
+        // 检查是否包含字母
+        if (!password.any { it.isLetter() }) {
+            throw IllegalArgumentException("密码需要包含至少一个字母")
+        }
+    }
+
+    /**
+     * 计算数据校验和
+     */
+    private fun calculateChecksum(expenses: List<ExpenseEntity>, categories: List<CategoryEntity>, budgets: List<BudgetEntity>): String {
+        val content = buildString {
+            append("expenses:")
+            expenses.sortedBy { it.timestamp }.forEach {
+                append("${it.amount}|${it.merchant}|${it.type}|${it.timestamp};")
+            }
+            append("categories:")
+            categories.sortedBy { it.name }.forEach {
+                append("${it.name}|${it.type};")
+            }
+            append("budgets:")
+            budgets.sortedBy { it.month }.forEach {
+                append("${it.amount}|${it.month};")
+            }
+        }
+
+        return try {
+            val md = MessageDigest.getInstance("SHA-256")
+            val digest = md.digest(content.toByteArray(Charsets.UTF_8))
+            digest.joinToString("") { "%02x".format(it) }.take(16)  // 只取前16位
+        } catch (e: Exception) {
+            Logger.e(tag, "计算校验和失败", e)
+            ""
+        }
+    }
+
+    /**
+     * 验证数据校验和
+     */
+    private fun verifyChecksum(backup: BackupData): Boolean {
+        if (backup.checksum.isEmpty()) {
+            // 旧版本备份没有校验和，跳过验证
+            Logger.w(tag, "备份文件无校验和（可能是旧版本），跳过完整性验证")
+            return true
+        }
+
+        val expectedChecksum = calculateChecksum(backup.expenses, backup.categories, backup.budgets)
+        val isValid = backup.checksum == expectedChecksum
+
+        if (!isValid) {
+            Logger.e(tag, "校验和不匹配: 期望=$expectedChecksum, 实际=${backup.checksum}")
+        }
+
+        return isValid
     }
 
     /**
@@ -75,10 +146,14 @@ class DataBackupManager(
             val categories = repository.getAllCategoriesOnce()
             val budgets = repository.getAllBudgetsOnce()
 
+            // 计算数据校验和
+            val checksum = calculateChecksum(expenses, categories, budgets)
+
             val backup = BackupData(
                 expenses = expenses,
                 categories = categories,
-                budgets = budgets
+                budgets = budgets,
+                checksum = checksum
             )
 
             val json = backupToJson(backup)
@@ -134,12 +209,17 @@ class DataBackupManager(
                 throw IllegalArgumentException("备份版本过高(${backup.version})，请更新应用后重试")
             }
 
-            // 2. 数据解析成功后，再清空现有数据（非合并模式）
+            // 2. 验证数据完整性（校验和）
+            if (!verifyChecksum(backup)) {
+                throw IllegalArgumentException("备份文件校验失败，数据可能已损坏或被篡改")
+            }
+
+            // 3. 数据解析成功后，再清空现有数据（非合并模式）
             if (!merge) {
                 repository.clearAllData()
             }
 
-            // 3. 导入数据，统计成功和失败数量
+            // 4. 导入数据，统计成功和失败数量
             var importedExpenses = 0
             var failedExpenses = 0
             var importedCategories = 0
@@ -241,9 +321,8 @@ class DataBackupManager(
      */
     suspend fun exportToEncryptedJson(password: String): Result<String> = withContext(Dispatchers.IO) {
         Result.suspendRunCatching {
-            if (password.length < 4) {
-                throw IllegalArgumentException("密码长度至少需要4位")
-            }
+            // 验证密码强度
+            validatePassword(password)
 
             Logger.d(tag) { "开始导出加密数据..." }
 
@@ -426,6 +505,7 @@ class DataBackupManager(
         val root = JSONObject().apply {
             put("version", backup.version)
             put("timestamp", backup.timestamp)
+            put("checksum", backup.checksum)  // 添加校验和字段
             put("expenses", expensesToJsonArray(backup.expenses))
             put("categories", categoriesToJsonArray(backup.categories))
             put("budgets", budgetsToJsonArray(backup.budgets))
@@ -450,7 +530,8 @@ class DataBackupManager(
             timestamp = root.optLong("timestamp", 0),
             expenses = jsonArrayToExpenses(root.optJSONArray("expenses")),
             categories = jsonArrayToCategories(root.optJSONArray("categories")),
-            budgets = jsonArrayToBudgets(root.optJSONArray("budgets"))
+            budgets = jsonArrayToBudgets(root.optJSONArray("budgets")),
+            checksum = root.optString("checksum", "")  // 读取校验和字段
         )
     }
 
