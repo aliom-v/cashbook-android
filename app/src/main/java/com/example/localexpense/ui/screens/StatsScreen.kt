@@ -37,6 +37,14 @@ typealias StatsPeriod = DateUtils.StatsPeriod
 // 统计类型：支出或收入
 enum class StatsType { EXPENSE, INCOME }
 
+/**
+ * 统计页面
+ *
+ * v1.9.6 性能优化：
+ * - 使用 derivedStateOf 缓存计算结果，减少重组
+ * - 使用 remember 缓存颜色列表和日期格式化结果
+ * - 优化分类明细列表渲染
+ */
 @Composable
 fun StatsScreen(
     categoryStats: List<CategoryStat>,
@@ -53,14 +61,41 @@ fun StatsScreen(
     // 当前显示的统计类型（支出/收入）
     var statsType by remember { mutableStateOf(StatsType.EXPENSE) }
 
-    // 根据当前类型选择数据
-    val currentCategoryStats = if (statsType == StatsType.EXPENSE) categoryStats else incomeCategoryStats
-    val currentDailyStats = if (statsType == StatsType.EXPENSE) dailyStats else incomeDailyStats
-    val currentTotal = if (statsType == StatsType.EXPENSE) totalExpense else totalIncome
-    val currentColor = if (statsType == StatsType.EXPENSE) ExpenseTheme.colors.expense else ExpenseTheme.colors.income
+    // v1.9.6 优化：使用 derivedStateOf 缓存计算结果
+    val currentCategoryStats by remember(statsType, categoryStats, incomeCategoryStats) {
+        derivedStateOf {
+            if (statsType == StatsType.EXPENSE) categoryStats else incomeCategoryStats
+        }
+    }
+
+    val currentDailyStats by remember(statsType, dailyStats, incomeDailyStats) {
+        derivedStateOf {
+            if (statsType == StatsType.EXPENSE) dailyStats else incomeDailyStats
+        }
+    }
+
+    val currentTotal by remember(statsType, totalExpense, totalIncome) {
+        derivedStateOf {
+            if (statsType == StatsType.EXPENSE) totalExpense else totalIncome
+        }
+    }
+
+    // 缓存颜色，避免每次重组都重新计算
+    val expenseColor = ExpenseTheme.colors.expense
+    val incomeColor = ExpenseTheme.colors.income
+    val currentColor by remember(statsType) {
+        derivedStateOf {
+            if (statsType == StatsType.EXPENSE) expenseColor else incomeColor
+        }
+    }
 
     // 缓存颜色列表，避免每次重组都重新创建
     val pieColors = remember { CategoryColorOptions.map { Color(it) } }
+
+    // v1.9.6 优化：缓存日期显示文本
+    val periodDateText = remember(currentDate, currentPeriod) {
+        formatPeriodDate(currentDate, currentPeriod)
+    }
 
     Column(
         modifier = Modifier
@@ -129,7 +164,7 @@ fun StatsScreen(
                 }
 
                 Text(
-                    text = formatPeriodDate(currentDate, currentPeriod),
+                    text = periodDateText,
                     fontWeight = FontWeight.Medium,
                     fontSize = 16.sp
                 )

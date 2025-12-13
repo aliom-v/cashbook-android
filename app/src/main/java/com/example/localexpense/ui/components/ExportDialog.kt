@@ -110,7 +110,7 @@ fun ExportDialog(
                                     readOnly = true,
                                     label = { Text("年份") },
                                     trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = yearExpanded) },
-                                    modifier = Modifier.menuAnchor()
+                                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable)
                                 )
                                 ExposedDropdownMenu(
                                     expanded = yearExpanded,
@@ -142,7 +142,7 @@ fun ExportDialog(
                                     readOnly = true,
                                     label = { Text("月份") },
                                     trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = monthExpanded) },
-                                    modifier = Modifier.menuAnchor()
+                                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable)
                                 )
                                 ExposedDropdownMenu(
                                     expanded = monthExpanded,

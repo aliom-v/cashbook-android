@@ -22,14 +22,27 @@ import androidx.compose.ui.unit.sp
 import com.example.localexpense.data.CategoryStat
 import com.example.localexpense.data.DailyStat
 
+/**
+ * 饼图组件
+ *
+ * v1.9.6 性能优化：
+ * - 使用 remember 缓存总额和百分比计算
+ * - 预计算扇形角度，避免在 Canvas 中重复计算
+ */
 @Composable
 fun PieChart(
     data: List<CategoryStat>,
     colors: List<Color>,
     modifier: Modifier = Modifier
 ) {
-    val total = data.sumOf { it.total }
+    // v1.9.6 优化：缓存总额计算
+    val total = remember(data) { data.sumOf { it.total } }
     if (total == 0.0) return
+
+    // v1.9.6 优化：预计算每个扇形的角度
+    val sweepAngles = remember(data, total) {
+        data.map { (it.total / total * 360f).toFloat() }
+    }
 
     var animationPlayed by remember { mutableStateOf(false) }
     val animatedProgress = animateFloatAsState(
@@ -53,16 +66,17 @@ fun PieChart(
                 .padding(8.dp)
         ) {
             var startAngle = -90f
-            data.forEachIndexed { index, stat ->
-                val sweepAngle = (stat.total / total * 360f * animatedProgress.value).toFloat()
+            // v1.9.6 优化：使用预计算的角度
+            sweepAngles.forEachIndexed { index, angle ->
+                val animatedAngle = angle * animatedProgress.value
                 drawArc(
                     color = colors.getOrElse(index) { Color.Gray },
                     startAngle = startAngle,
-                    sweepAngle = sweepAngle,
+                    sweepAngle = animatedAngle,
                     useCenter = true,
                     size = Size(size.width, size.height)
                 )
-                startAngle += sweepAngle
+                startAngle += animatedAngle
             }
             // Center hole - use surface color for dark mode support
             drawCircle(
@@ -105,6 +119,13 @@ fun PieChart(
     }
 }
 
+/**
+ * 柱状图组件
+ *
+ * v1.9.6 性能优化：
+ * - 使用 remember 缓存最大值和高度比例计算
+ * - 预计算日期标签
+ */
 @Composable
 fun BarChart(
     data: List<DailyStat>,
@@ -113,7 +134,18 @@ fun BarChart(
 ) {
     if (data.isEmpty()) return
 
-    val maxValue = data.maxOfOrNull { it.total } ?: 1.0
+    // v1.9.6 优化：缓存最大值计算
+    val maxValue = remember(data) { data.maxOfOrNull { it.total } ?: 1.0 }
+
+    // v1.9.6 优化：预计算每个柱子的高度比例
+    val heightRatios = remember(data, maxValue) {
+        data.map { (it.total / maxValue).toFloat() }
+    }
+
+    // v1.9.6 优化：预计算日期标签
+    val dateLabels = remember(data) {
+        data.map { it.date.takeLast(2) }
+    }
 
     var animationPlayed by remember { mutableStateOf(false) }
     val animatedProgress = animateFloatAsState(
@@ -136,8 +168,9 @@ fun BarChart(
             val spacing = barWidth
             
             Canvas(modifier = Modifier.fillMaxSize()) {
-                data.forEachIndexed { index, stat ->
-                    val barHeight = (stat.total / maxValue * size.height * animatedProgress.value).toFloat()
+                // v1.9.6 优化：使用预计算的高度比例
+                heightRatios.forEachIndexed { index, ratio ->
+                    val barHeight = ratio * size.height * animatedProgress.value
                     val x = index * (barWidth + spacing) + spacing / 2
 
                     drawRoundRect(
@@ -158,17 +191,18 @@ fun BarChart(
         }
 
         // X-axis labels - 使用相同的布局计算方式
+        // v1.9.6 优化：使用预计算的日期标签
         Row(
             modifier = Modifier.fillMaxWidth()
         ) {
-            data.forEachIndexed { index, stat ->
+            dateLabels.forEach { label ->
                 // 每个标签占据 barWidth + spacing 的空间
                 Box(
                     modifier = Modifier.weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = stat.date.takeLast(2),
+                        text = label,
                         fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

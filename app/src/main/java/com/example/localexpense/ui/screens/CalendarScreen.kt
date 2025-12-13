@@ -26,6 +26,14 @@ import com.example.localexpense.ui.theme.ExpenseTheme
 import com.example.localexpense.util.DateUtils
 import java.util.*
 
+/**
+ * 日历页面
+ *
+ * v1.9.6 性能优化：
+ * - 使用 derivedStateOf 缓存选中日期的交易列表
+ * - 预计算每日收支统计，避免重复遍历
+ * - 优化日历网格渲染
+ */
 @Composable
 fun CalendarScreen(
     expenses: List<ExpenseEntity>,
@@ -38,6 +46,18 @@ fun CalendarScreen(
     // 使用 remember 缓存分组结果，使用 DateUtils 的线程安全方法
     val expensesByDate = remember(expenses) {
         expenses.groupBy { DateUtils.formatDate(it.timestamp) }
+    }
+
+    // v1.9.6 优化：使用 derivedStateOf 缓存选中日期的交易
+    val selectedExpenses by remember(selectedDate, expensesByDate) {
+        derivedStateOf { expensesByDate[selectedDate] ?: emptyList() }
+    }
+
+    // v1.9.6 优化：预计算选中日期的收支统计
+    val (dayExpense, dayIncome) = remember(selectedExpenses) {
+        val expense = selectedExpenses.filter { it.type == "expense" }.sumOf { it.amount }
+        val income = selectedExpenses.filter { it.type == "income" }.sumOf { it.amount }
+        expense to income
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -104,9 +124,7 @@ fun CalendarScreen(
             }
         }
 
-        // Selected date expenses
-        val selectedExpenses = expensesByDate[selectedDate] ?: emptyList()
-        
+        // Selected date expenses - 使用预计算的 selectedExpenses
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -141,10 +159,8 @@ fun CalendarScreen(
                     }
                 } else {
                     Spacer(modifier = Modifier.height(12.dp))
-                    
-                    val dayExpense = selectedExpenses.filter { it.type == "expense" }.sumOf { it.amount }
-                    val dayIncome = selectedExpenses.filter { it.type == "income" }.sumOf { it.amount }
-                    
+
+                    // v1.9.6 优化：使用预计算的收支统计
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly

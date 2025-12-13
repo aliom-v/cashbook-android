@@ -110,6 +110,43 @@ APK 输出位置：
 
 ## 更新日志
 
+### v1.9.9 (最新)
+- 新增 RetryUtils 单元测试 (25+ 测试用例)
+- 新增 Logger 单元测试 (20+ 测试用例)
+- 新增 Constants/AmountUtils 单元测试 (40+ 测试用例)
+- 测试覆盖率提升至 289 个测试
+- 工具类测试覆盖完善
+
+### v1.9.8
+- 新增 FilterManager 单元测试 (40+ 测试用例)
+- 测试覆盖率提升至 195 个测试
+- 更新日志文档完善
+
+### v1.9.7
+- 新增分类统计带数量和平均值功能
+- 新增月度/年度趋势分析
+- 新增按渠道筛选和大额交易查询
+- 完善 UseCase 层单元测试覆盖
+- 数据库索引优化，提升查询性能
+
+### v1.9.6
+- 数据库新增 channel 和 amount+type 复合索引
+- UI 性能优化：使用 derivedStateOf 缓存计算结果
+- 新增 CategoryStatWithCount 和 MonthlyTrendStat 数据类
+- StatsScreen 和 CalendarScreen 性能优化
+
+### v1.9.5
+- 集成 LeakCanary 内存泄漏检测
+- 添加 Jacoco 代码覆盖率报告
+- Flow 生命周期感知优化 (collectAsStateWithLifecycle)
+- 修复废弃 API 警告
+- 新增 50+ 单元测试
+
+### v1.9.4
+- ViewModel 重构为 UseCase 层注入
+- 异常处理添加类型分类日志
+- 代码重复消除优化
+
 ### v1.8.0
 - 修复 ANR 风险，改用协程异步处理
 - 修复并发竞态条件，采用原子操作

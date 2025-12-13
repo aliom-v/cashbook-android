@@ -37,6 +37,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * - 超时保护
  * - 自动重试（可选）
  * - 性能监控
+ *
+ * 资源管理优化 (v1.8.1)：
+ * - 自动空闲释放：长时间未使用自动释放资源
+ * - 内存压力响应：低内存时自动释放
+ * - 懒加载重建：需要时自动重建识别器
  */
 object OcrParser {
 
@@ -48,6 +53,9 @@ object OcrParser {
     private const val MIN_IMAGE_SIZE = 100
     private const val OCR_TIMEOUT_MS = 5000L  // OCR 超时时间
     private const val MAX_RETRY_COUNT = 1     // 最大重试次数
+
+    // 自动释放配置 (v1.8.1)
+    private const val IDLE_RELEASE_DELAY_MS = 60_000L  // 空闲 60 秒后自动释放
 
     // 识别器实例（线程安全的懒加载，支持释放后重新创建）
     @Volatile
@@ -61,6 +69,13 @@ object OcrParser {
     // 标记是否已永久释放（服务销毁时）
     @Volatile
     private var isPermanentlyReleased = false
+
+    // 最后使用时间（用于自动释放）
+    @Volatile
+    private var lastUsedTime = 0L
+
+    // 自动释放任务
+    private var idleReleaseRunnable: Runnable? = null
 
     // 统计信息
     private val successCount = AtomicInteger(0)
@@ -81,13 +96,48 @@ object OcrParser {
                 _recognizer ?: try {
                     TextRecognition.getClient(
                         ChineseTextRecognizerOptions.Builder().build()
-                    ).also { _recognizer = it }
+                    ).also {
+                        _recognizer = it
+                        // 记录使用时间并安排自动释放
+                        scheduleIdleRelease()
+                    }
                 } catch (e: Exception) {
                     Logger.e(TAG, "创建 OCR 识别器失败", e)
                     null
                 }
             }
         }
+
+    /**
+     * 安排空闲自动释放 (v1.8.1)
+     */
+    private fun scheduleIdleRelease() {
+        lastUsedTime = System.currentTimeMillis()
+
+        // 取消之前的释放任务
+        idleReleaseRunnable?.let { mainHandler.removeCallbacks(it) }
+
+        // 安排新的释放任务
+        idleReleaseRunnable = Runnable {
+            val idleTime = System.currentTimeMillis() - lastUsedTime
+            if (idleTime >= IDLE_RELEASE_DELAY_MS && _recognizer != null) {
+                Logger.d(TAG) { "OCR 空闲 ${idleTime/1000}秒，自动释放资源" }
+                release(permanent = false)
+            }
+        }
+        mainHandler.postDelayed(idleReleaseRunnable!!, IDLE_RELEASE_DELAY_MS)
+    }
+
+    /**
+     * 更新最后使用时间（每次使用时调用）
+     */
+    private fun touchLastUsed() {
+        lastUsedTime = System.currentTimeMillis()
+        // 重新安排自动释放
+        if (_recognizer != null) {
+            scheduleIdleRelease()
+        }
+    }
 
     /**
      * 从截图中识别交易信息
@@ -101,6 +151,8 @@ object OcrParser {
         packageName: String,
         callback: (ExpenseEntity?) -> Unit
     ) {
+        // 更新使用时间，延迟自动释放
+        touchLastUsed()
         parseFromBitmapInternal(bitmap, packageName, callback, retryCount = 0)
     }
 
@@ -143,6 +195,14 @@ object OcrParser {
                 Logger.w(TAG, "OCR 识别超时 (${OCR_TIMEOUT_MS}ms)")
                 timeoutCount.incrementAndGet()
                 PerformanceMonitor.endTimer(PerformanceMonitor.Operations.OCR_RECOGNIZE, startTime)
+                // 修复：超时时也要回收处理后的 Bitmap，防止内存泄漏
+                if (processedBitmap !== bitmap && !processedBitmap.isRecycled) {
+                    try {
+                        processedBitmap.recycle()
+                    } catch (e: Exception) {
+                        // 忽略回收异常
+                    }
+                }
                 callback(null)
             }
         }
@@ -158,6 +218,14 @@ object OcrParser {
                     mainHandler.removeCallbacks(timeoutRunnable)
                     if (isCompleted.compareAndSet(false, true)) {
                         PerformanceMonitor.endTimer(PerformanceMonitor.Operations.OCR_RECOGNIZE, startTime)
+                        // 成功时回收处理后的 Bitmap
+                        if (processedBitmap !== bitmap && !processedBitmap.isRecycled) {
+                            try {
+                                processedBitmap.recycle()
+                            } catch (e: Exception) {
+                                // 忽略回收异常
+                            }
+                        }
                         handleOcrSuccess(visionText, packageName, callback)
                     }
                 }
@@ -165,6 +233,14 @@ object OcrParser {
                     mainHandler.removeCallbacks(timeoutRunnable)
                     if (isCompleted.compareAndSet(false, true)) {
                         PerformanceMonitor.endTimer(PerformanceMonitor.Operations.OCR_RECOGNIZE, startTime)
+                        // 失败时回收处理后的 Bitmap
+                        if (processedBitmap !== bitmap && !processedBitmap.isRecycled) {
+                            try {
+                                processedBitmap.recycle()
+                            } catch (ex: Exception) {
+                                // 忽略回收异常
+                            }
+                        }
                         handleOcrFailure(e, bitmap, packageName, callback, retryCount)
                     }
                 }
@@ -172,20 +248,24 @@ object OcrParser {
             mainHandler.removeCallbacks(timeoutRunnable)
             if (isCompleted.compareAndSet(false, true)) {
                 PerformanceMonitor.endTimer(PerformanceMonitor.Operations.OCR_RECOGNIZE, startTime)
+                // 异常时回收处理后的 Bitmap
+                if (processedBitmap !== bitmap && !processedBitmap.isRecycled) {
+                    try {
+                        processedBitmap.recycle()
+                    } catch (ex: Exception) {
+                        // 忽略回收异常
+                    }
+                }
                 Logger.e(TAG, "OCR 处理异常", e)
                 failureCount.incrementAndGet()
                 callback(null)
-            }
-        } finally {
-            // 如果处理后的图片是新创建的，需要回收
-            if (processedBitmap !== bitmap && !processedBitmap.isRecycled) {
-                processedBitmap.recycle()
             }
         }
     }
 
     /**
      * 验证图片
+     * 修复：边界值与 preprocessBitmap 保持一致
      */
     private fun validateBitmap(bitmap: Bitmap): String? {
         if (bitmap.isRecycled) {
@@ -194,8 +274,10 @@ object OcrParser {
         if (bitmap.width < MIN_IMAGE_SIZE || bitmap.height < MIN_IMAGE_SIZE) {
             return "图片太小 (${bitmap.width}x${bitmap.height})"
         }
-        if (bitmap.width > MAX_IMAGE_WIDTH * 2 || bitmap.height > MAX_IMAGE_HEIGHT * 2) {
-            return "图片太大 (${bitmap.width}x${bitmap.height})"
+        // 修复：允许的最大尺寸与预处理逻辑一致，超过会被缩放
+        // 但如果图片过大（超过合理范围），直接拒绝以避免 OOM
+        if (bitmap.width > MAX_IMAGE_WIDTH * 3 || bitmap.height > MAX_IMAGE_HEIGHT * 3) {
+            return "图片太大 (${bitmap.width}x${bitmap.height})，超出处理范围"
         }
         return null
     }

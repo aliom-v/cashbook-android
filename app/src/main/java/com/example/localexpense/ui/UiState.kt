@@ -20,6 +20,11 @@ typealias UiState = MainUiState
 
 /**
  * 主界面 UI 状态
+ *
+ * v1.9.6 优化：
+ * - 添加预计算的统计数据缓存
+ * - 优化 displayExpenses 计算逻辑
+ * - 新增渠道统计支持
  */
 data class MainUiState(
     // 数据状态
@@ -66,7 +71,11 @@ data class MainUiState(
     val loadingState: LoadingState = LoadingState.Loading,
 
     // 操作状态（用于显示操作中的加载指示器）
-    val operationState: OperationState = OperationState.Idle
+    val operationState: OperationState = OperationState.Idle,
+
+    // v1.9.6 新增：预计算的统计缓存
+    val expenseCount: Int = 0,
+    val incomeCount: Int = 0
 ) {
     // 便捷属性
     val isLoading: Boolean get() = loadingState is LoadingState.Loading
@@ -74,12 +83,7 @@ data class MainUiState(
     val errorMessage: String? get() = (loadingState as? LoadingState.Error)?.message
 
     val isOperating: Boolean get() = operationState !is OperationState.Idle
-    val operationMessage: String? get() = when (operationState) {
-        is OperationState.Saving -> "保存中..."
-        is OperationState.Deleting -> "删除中..."
-        is OperationState.Exporting -> "导出中..."
-        else -> null
-    }
+    val operationMessage: String? get() = operationState.displayMessage
 
     // 显示用的交易列表（考虑筛选，筛选结果为空时返回空列表）
     val displayExpenses: List<ExpenseEntity>
@@ -133,7 +137,18 @@ sealed class OperationState {
     object Saving : OperationState()
     object Deleting : OperationState()
     object Exporting : OperationState()
+    object Restoring : OperationState()  // 新增：恢复状态
     data class Error(val message: String) : OperationState()
+
+    // 获取状态描述文本
+    val displayMessage: String? get() = when (this) {
+        is Saving -> "保存中..."
+        is Deleting -> "删除中..."
+        is Exporting -> "导出中..."
+        is Restoring -> "恢复中..."
+        is Error -> message
+        else -> null
+    }
 }
 
 /**
@@ -141,7 +156,12 @@ sealed class OperationState {
  */
 sealed class UiEvent {
     data class ShowToast(val message: String, val isError: Boolean = false) : UiEvent()
-    data class ShowSnackbar(val message: String, val actionLabel: String? = null, val action: (() -> Unit)? = null) : UiEvent()
+    data class ShowSnackbar(
+        val message: String,
+        val actionLabel: String? = null,
+        val action: (() -> Unit)? = null,
+        val duration: SnackbarDurationType = SnackbarDurationType.SHORT
+    ) : UiEvent()
     object NavigateBack : UiEvent()
     data class NavigateToDetail(val expenseId: Long) : UiEvent()
     object RefreshComplete : UiEvent()
@@ -150,6 +170,15 @@ sealed class UiEvent {
     data class ImportSuccess(val importedCount: Int, val skippedCount: Int, val failedCount: Int) : UiEvent()
     data class OperationSuccess(val message: String) : UiEvent()
     data class ConfirmAction(val title: String, val message: String, val onConfirm: () -> Unit) : UiEvent()
+}
+
+/**
+ * Snackbar 持续时间类型
+ */
+enum class SnackbarDurationType {
+    SHORT,      // 短时间（约4秒）
+    LONG,       // 长时间（约10秒）
+    INDEFINITE  // 无限时间（需要手动关闭）
 }
 
 /**

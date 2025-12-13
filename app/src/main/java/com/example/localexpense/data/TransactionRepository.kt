@@ -1,6 +1,12 @@
 package com.example.localexpense.data
 
 import android.content.Context
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.map
+import com.example.localexpense.domain.repository.ITransactionRepository
+import com.example.localexpense.util.Constants
 import com.example.localexpense.util.CryptoUtils
 import com.example.localexpense.util.InputValidator
 import com.example.localexpense.util.Logger
@@ -15,19 +21,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import androidx.room.withTransaction
+import javax.inject.Inject
+import javax.inject.Singleton
+import dagger.hilt.android.qualifiers.ApplicationContext
 
-class TransactionRepository private constructor(context: Context) {
+@Singleton
+class TransactionRepository @Inject constructor(
+    @ApplicationContext context: Context
+) : ITransactionRepository {
 
     companion object {
         private const val TAG = "TransactionRepo"
 
-        @Volatile
-        private var INSTANCE: TransactionRepository? = null
-
-        fun getInstance(context: Context): TransactionRepository =
-            INSTANCE ?: synchronized(this) {
-                INSTANCE ?: TransactionRepository(context).also { INSTANCE = it }
-            }
+        // Paging 配置 - 使用 Constants 中定义的值
+        private const val PAGE_SIZE = Constants.PAGE_SIZE
+        private const val PREFETCH_DISTANCE = Constants.PREFETCH_DISTANCE
+        private const val INITIAL_LOAD_SIZE = Constants.PAGE_SIZE * 2  // 首次加载两页
     }
 
     // 使用 applicationContext 防止 Activity Context 泄漏
@@ -49,28 +58,12 @@ class TransactionRepository private constructor(context: Context) {
 
     init {
         // 在后台初始化默认分类
+        // 统一使用 waitForInitialization() 避免代码重复
         repositoryScope.launch {
             try {
-                initDefaultCategoriesInternal()
+                waitForInitialization()
             } catch (e: Exception) {
                 Logger.e(TAG, "初始化默认分类失败", e)
-            }
-        }
-    }
-
-    private suspend fun initDefaultCategoriesInternal() {
-        // 使用 Mutex 确保只有一个协程执行初始化
-        initMutex.withLock {
-            if (isInitialized) return
-            try {
-                val count = categoryDao.count()
-                if (count == 0) {
-                    categoryDao.insertAll(DefaultCategories.expense + DefaultCategories.income)
-                    Logger.i(TAG, "默认分类初始化完成")
-                }
-                isInitialized = true
-            } catch (e: Exception) {
-                Logger.e(TAG, "initDefaultCategoriesInternal 失败", e)
             }
         }
     }
@@ -79,8 +72,10 @@ class TransactionRepository private constructor(context: Context) {
      * 等待 Repository 初始化完成
      * 用于确保在插入数据前，默认分类已初始化
      * 使用双重检查锁定模式确保线程安全
+     *
+     * v1.9.3 优化：合并初始化逻辑，移除 initDefaultCategoriesInternal()
      */
-    suspend fun waitForInitialization() {
+    override suspend fun waitForInitialization() {
         // 快速路径：已初始化则直接返回（volatile 读）
         if (isInitialized) return
         // 进入 Mutex 保护区域进行第二次检查
@@ -97,6 +92,7 @@ class TransactionRepository private constructor(context: Context) {
                 isInitialized = true
             } catch (e: Exception) {
                 Logger.e(TAG, "waitForInitialization 失败", e)
+                throw e  // 重新抛出异常，让调用者知道初始化失败
             }
         }
     }
@@ -104,34 +100,84 @@ class TransactionRepository private constructor(context: Context) {
     /**
      * 检查是否已初始化
      */
-    fun isInitialized(): Boolean = isInitialized
+    override fun isInitialized(): Boolean = isInitialized
 
     // 关闭资源（App退出时调用）
-    fun shutdown() {
+    override fun shutdown() {
         repositoryScope.cancel()
     }
 
-    // Expense operations - 异步插入，使用协程
+    // ==================== 交易插入（优化：提取公共逻辑） ====================
+
+    /**
+     * 内部方法：执行实际的交易插入操作
+     * v1.9.5 优化：提取公共逻辑，减少代码重复
+     *
+     * @param entity 交易实体
+     * @param useRetry 是否使用重试机制
+     * @return 插入的记录ID
+     */
+    private suspend fun insertTransactionInternal(entity: ExpenseEntity, useRetry: Boolean = false): Long {
+        waitForInitialization()
+        val encryptedEntity = encryptEntity(entity)
+        return if (useRetry) {
+            RetryUtils.withRetry(
+                maxRetries = 2,
+                shouldRetry = RetryUtils::isRetryableDbException
+            ) {
+                expenseDao.insert(encryptedEntity)
+            }
+        } else {
+            expenseDao.insert(encryptedEntity)
+        }
+    }
+
+    /**
+     * 内部方法：在主线程执行回调
+     */
+    private suspend fun <T> callbackOnMain(callback: ((T) -> Unit)?, value: T) {
+        callback?.let {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                it(value)
+            }
+        }
+    }
+
     /**
      * 异步插入交易记录
      * @param entity 交易实体
      * @param onError 可选的错误回调，在主线程调用
      */
-    fun insertTransaction(entity: ExpenseEntity, onError: ((String) -> Unit)? = null) {
+    override fun insertTransaction(entity: ExpenseEntity, onError: ((String) -> Unit)?) {
         repositoryScope.launch {
             try {
-                // 等待初始化完成
-                waitForInitialization()
-                // 加密 rawText 后插入
-                expenseDao.insert(encryptEntity(entity))
+                insertTransactionInternal(entity)
             } catch (e: Exception) {
                 Logger.e(TAG, "插入失败", e)
-                // 在主线程回调错误信息
-                onError?.let { callback ->
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                        callback("记账失败: ${e.message}")
-                    }
-                }
+                callbackOnMain(onError, "记账失败: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 异步插入交易记录（带完整回调）
+     *
+     * @param entity 交易实体
+     * @param onSuccess 成功回调，返回插入的记录ID，在主线程调用
+     * @param onError 失败回调，返回错误信息，在主线程调用
+     */
+    override fun insertTransactionWithCallback(
+        entity: ExpenseEntity,
+        onSuccess: ((Long) -> Unit)?,
+        onError: ((String) -> Unit)?
+    ) {
+        repositoryScope.launch {
+            try {
+                val id = insertTransactionInternal(entity)
+                callbackOnMain(onSuccess, id)
+            } catch (e: Exception) {
+                Logger.e(TAG, "插入失败", e)
+                callbackOnMain(onError, "记账失败: ${e.message}")
             }
         }
     }
@@ -141,16 +187,9 @@ class TransactionRepository private constructor(context: Context) {
      * 会等待初始化完成后再插入，支持自动重试
      * @return 插入成功返回 true，失败返回 false
      */
-    suspend fun insertTransactionSync(entity: ExpenseEntity): Boolean {
+    override suspend fun insertTransactionSync(entity: ExpenseEntity): Boolean {
         return try {
-            waitForInitialization()
-            // 使用重试机制处理临时性数据库错误
-            RetryUtils.withRetry(
-                maxRetries = 2,
-                shouldRetry = RetryUtils::isRetryableDbException
-            ) {
-                expenseDao.insert(encryptEntity(entity))
-            }
+            insertTransactionInternal(entity, useRetry = true)
             true
         } catch (e: Exception) {
             Logger.e(TAG, "同步插入失败", e)
@@ -158,23 +197,25 @@ class TransactionRepository private constructor(context: Context) {
         }
     }
 
-    suspend fun insertExpense(entity: ExpenseEntity): Long =
-        RetryUtils.withRetry(shouldRetry = RetryUtils::isRetryableDbException) {
+    override suspend fun insertExpense(entity: ExpenseEntity): Long {
+        waitForInitialization()
+        return RetryUtils.withRetry(shouldRetry = RetryUtils::isRetryableDbException) {
             expenseDao.insert(encryptEntity(entity))
         }
+    }
 
-    suspend fun updateExpense(entity: ExpenseEntity) =
+    override suspend fun updateExpense(entity: ExpenseEntity) =
         RetryUtils.withRetry(shouldRetry = RetryUtils::isRetryableDbException) {
             expenseDao.update(encryptEntity(entity))
         }
 
-    suspend fun deleteExpense(entity: ExpenseEntity) = expenseDao.delete(entity)
+    override suspend fun deleteExpense(entity: ExpenseEntity) = expenseDao.delete(entity)
 
-    fun getAllFlow(): Flow<List<ExpenseEntity>> = expenseDao.getAll().map { list ->
+    override fun getAllFlow(): Flow<List<ExpenseEntity>> = expenseDao.getAll().map { list ->
         list.map { decryptEntity(it) }
     }
 
-    fun getByDateRange(start: Long, end: Long): Flow<List<ExpenseEntity>> =
+    override fun getByDateRange(start: Long, end: Long): Flow<List<ExpenseEntity>> =
         expenseDao.getByDateRange(start, end).map { list ->
             list.map { decryptEntity(it) }
         }
@@ -183,7 +224,7 @@ class TransactionRepository private constructor(context: Context) {
      * 搜索交易记录，自动清理和转义查询字符串
      * 使用 InputValidator 进行完整的安全处理
      */
-    fun search(query: String): Flow<List<ExpenseEntity>> {
+    override fun search(query: String): Flow<List<ExpenseEntity>> {
         // 使用 InputValidator 进行完整的安全处理（清理 + SQL LIKE 转义）
         val safeQuery = InputValidator.prepareSearchQuery(query)
         if (safeQuery.isEmpty()) {
@@ -200,63 +241,167 @@ class TransactionRepository private constructor(context: Context) {
         return InputValidator.escapeSqlLikePattern(query)
     }
 
-    fun getTotalExpense(start: Long, end: Long) = expenseDao.getTotalExpense(start, end)
+    override fun getTotalExpense(start: Long, end: Long) = expenseDao.getTotalExpense(start, end)
 
-    fun getTotalIncome(start: Long, end: Long) = expenseDao.getTotalIncome(start, end)
+    override fun getTotalIncome(start: Long, end: Long) = expenseDao.getTotalIncome(start, end)
 
     /**
      * 获取收支总额（单次查询，性能更优）
      */
-    fun getTotalExpenseAndIncome(start: Long, end: Long) = expenseDao.getTotalExpenseAndIncome(start, end)
+    override fun getTotalExpenseAndIncome(start: Long, end: Long) = expenseDao.getTotalExpenseAndIncome(start, end)
 
-    fun getCategoryStats(type: String, start: Long, end: Long) = expenseDao.getCategoryStats(type, start, end)
+    override fun getCategoryStats(type: String, start: Long, end: Long) = expenseDao.getCategoryStats(type, start, end)
 
-    fun getDailyStats(type: String, start: Long, end: Long) = expenseDao.getDailyStats(type, start, end)
+    override fun getDailyStats(type: String, start: Long, end: Long) = expenseDao.getDailyStats(type, start, end)
 
-    fun getByDate(date: String): Flow<List<ExpenseEntity>> =
+    override fun getByDate(date: String): Flow<List<ExpenseEntity>> =
         expenseDao.getByDate(date).map { list ->
             list.map { decryptEntity(it) }
         }
 
-    // Category operations
-    fun getAllCategories() = categoryDao.getAll()
-
-    fun getCategoriesByType(type: String) = categoryDao.getByType(type)
-
-    suspend fun getCategoryById(id: Long) = categoryDao.getById(id)
-
-    suspend fun insertCategory(category: CategoryEntity) = categoryDao.insert(category)
-
-    suspend fun updateCategory(category: CategoryEntity) = categoryDao.update(category)
-
-    suspend fun deleteCategory(category: CategoryEntity) = categoryDao.delete(category)
+    /**
+     * 分页获取所有记录
+     * @param limit 每页数量
+     * @param offset 偏移量
+     */
+    override fun getAllPaged(limit: Int, offset: Int): Flow<List<ExpenseEntity>> =
+        expenseDao.getAllPaged(limit, offset).map { list ->
+            list.map { decryptEntity(it) }
+        }
 
     /**
-     * 初始化默认分类（公开方法，内部调用受保护的初始化逻辑）
+     * 分页搜索交易记录
+     * @param query 搜索关键词
+     * @param limit 每页数量
+     * @param offset 偏移量
      */
-    suspend fun initDefaultCategories() {
-        initDefaultCategoriesInternal()
+    override fun searchPaged(query: String, limit: Int, offset: Int): Flow<List<ExpenseEntity>> {
+        val safeQuery = InputValidator.prepareSearchQuery(query)
+        if (safeQuery.isEmpty()) {
+            return kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        return expenseDao.searchPaged(safeQuery, limit, offset).map { list ->
+            list.map { decryptEntity(it) }
+        }
+    }
+
+    /**
+     * 获取最近 N 条记录（用于首页展示）
+     * @param limit 记录数量
+     */
+    override fun getRecent(limit: Int): Flow<List<ExpenseEntity>> =
+        expenseDao.getRecent(limit).map { list ->
+            list.map { decryptEntity(it) }
+        }
+
+    /**
+     * 获取总记录数
+     */
+    override suspend fun getExpenseCount(): Int = expenseDao.getExpenseCount()
+
+    // ==================== Paging 3 分页查询 ====================
+
+    /**
+     * 获取所有交易记录（Paging 3 分页）
+     * 适用于大数据集，按需加载，避免 OOM
+     */
+    override fun getAllPaging(): Flow<PagingData<ExpenseEntity>> {
+        return Pager(
+            config = PagingConfig(
+                pageSize = PAGE_SIZE,
+                prefetchDistance = PREFETCH_DISTANCE,
+                initialLoadSize = INITIAL_LOAD_SIZE,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = { expenseDao.getAllPaging() }
+        ).flow.map { pagingData ->
+            pagingData.map { decryptEntity(it) }
+        }
+    }
+
+    /**
+     * 搜索交易记录（Paging 3 分页）
+     * @param query 搜索关键词
+     */
+    override fun searchPaging(query: String): Flow<PagingData<ExpenseEntity>> {
+        val safeQuery = InputValidator.prepareSearchQuery(query)
+        if (safeQuery.isEmpty()) {
+            return Pager(
+                config = PagingConfig(pageSize = PAGE_SIZE),
+                pagingSourceFactory = { EmptyPagingSource<ExpenseEntity>() }
+            ).flow
+        }
+        return Pager(
+            config = PagingConfig(
+                pageSize = PAGE_SIZE,
+                prefetchDistance = PREFETCH_DISTANCE,
+                initialLoadSize = INITIAL_LOAD_SIZE,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = { expenseDao.searchPaging(safeQuery) }
+        ).flow.map { pagingData ->
+            pagingData.map { decryptEntity(it) }
+        }
+    }
+
+    /**
+     * 按日期范围查询（Paging 3 分页）
+     * @param start 开始时间戳
+     * @param end 结束时间戳
+     */
+    override fun getByDateRangePaging(start: Long, end: Long): Flow<PagingData<ExpenseEntity>> {
+        return Pager(
+            config = PagingConfig(
+                pageSize = PAGE_SIZE,
+                prefetchDistance = PREFETCH_DISTANCE,
+                initialLoadSize = INITIAL_LOAD_SIZE,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = { expenseDao.getByDateRangePaging(start, end) }
+        ).flow.map { pagingData ->
+            pagingData.map { decryptEntity(it) }
+        }
+    }
+
+    // Category operations
+    override fun getAllCategories() = categoryDao.getAll()
+
+    override fun getCategoriesByType(type: String) = categoryDao.getByType(type)
+
+    override suspend fun getCategoryById(id: Long) = categoryDao.getById(id)
+
+    override suspend fun insertCategory(category: CategoryEntity) = categoryDao.insert(category)
+
+    override suspend fun updateCategory(category: CategoryEntity) = categoryDao.update(category)
+
+    override suspend fun deleteCategory(category: CategoryEntity) = categoryDao.delete(category)
+
+    /**
+     * 初始化默认分类（公开方法，调用 waitForInitialization）
+     */
+    override suspend fun initDefaultCategories() {
+        waitForInitialization()
     }
 
     // Budget operations
-    fun getBudgetsByMonth(month: Int) = budgetDao.getByMonth(month)
+    override fun getBudgetsByMonth(month: Int) = budgetDao.getByMonth(month)
 
-    fun getTotalBudget(month: Int) = budgetDao.getTotalBudget(month)
+    override fun getTotalBudget(month: Int) = budgetDao.getTotalBudget(month)
 
-    suspend fun insertBudget(budget: BudgetEntity) = budgetDao.insert(budget)
+    override suspend fun insertBudget(budget: BudgetEntity): Long = budgetDao.insert(budget)
 
-    suspend fun deleteBudget(budget: BudgetEntity) = budgetDao.delete(budget)
+    override suspend fun deleteBudget(budget: BudgetEntity) = budgetDao.delete(budget)
 
     // ========== 数据备份相关 ==========
 
-    suspend fun getAllExpensesOnce(): List<ExpenseEntity> =
+    override suspend fun getAllExpensesOnce(): List<ExpenseEntity> =
         expenseDao.getAllOnce().map { decryptEntity(it) }
 
-    suspend fun getAllCategoriesOnce(): List<CategoryEntity> = categoryDao.getAllOnce()
+    override suspend fun getAllCategoriesOnce(): List<CategoryEntity> = categoryDao.getAllOnce()
 
-    suspend fun getAllBudgetsOnce(): List<BudgetEntity> = budgetDao.getAllOnce()
+    override suspend fun getAllBudgetsOnce(): List<BudgetEntity> = budgetDao.getAllOnce()
 
-    suspend fun clearAllData() {
+    override suspend fun clearAllData() {
         expenseDao.deleteAll()
         categoryDao.deleteAll()
         budgetDao.deleteAll()
@@ -269,7 +414,7 @@ class TransactionRepository private constructor(context: Context) {
      * @param entities 交易实体列表
      * @return BatchInsertResult 包含成功/失败数量
      */
-    suspend fun insertExpensesBatch(entities: List<ExpenseEntity>): BatchInsertResult {
+    override suspend fun insertExpensesBatch(entities: List<ExpenseEntity>): BatchInsertResult {
         if (entities.isEmpty()) {
             return BatchInsertResult(0, 0, emptyList())
         }
@@ -297,7 +442,7 @@ class TransactionRepository private constructor(context: Context) {
      * @param entities 交易实体列表
      * @return BatchInsertResult 包含成功/失败数量和错误信息
      */
-    suspend fun insertExpensesBatchBestEffort(entities: List<ExpenseEntity>): BatchInsertResult {
+    override suspend fun insertExpensesBatchBestEffort(entities: List<ExpenseEntity>): BatchInsertResult {
         if (entities.isEmpty()) {
             return BatchInsertResult(0, 0, emptyList())
         }
@@ -326,7 +471,7 @@ class TransactionRepository private constructor(context: Context) {
     /**
      * 批量插入分类（带事务保护）
      */
-    suspend fun insertCategoriesBatch(categories: List<CategoryEntity>): BatchInsertResult {
+    override suspend fun insertCategoriesBatch(categories: List<CategoryEntity>): BatchInsertResult {
         if (categories.isEmpty()) {
             return BatchInsertResult(0, 0, emptyList())
         }
@@ -345,7 +490,7 @@ class TransactionRepository private constructor(context: Context) {
     /**
      * 批量插入预算（带事务保护）
      */
-    suspend fun insertBudgetsBatch(budgets: List<BudgetEntity>): BatchInsertResult {
+    override suspend fun insertBudgetsBatch(budgets: List<BudgetEntity>): BatchInsertResult {
         if (budgets.isEmpty()) {
             return BatchInsertResult(0, 0, emptyList())
         }
@@ -364,7 +509,7 @@ class TransactionRepository private constructor(context: Context) {
     /**
      * 仅删除所有账单记录（保留分类和预算）
      */
-    suspend fun deleteAllExpenses() {
+    override suspend fun deleteAllExpenses() {
         expenseDao.deleteAll()
     }
 
@@ -375,7 +520,7 @@ class TransactionRepository private constructor(context: Context) {
      * @param ids 要删除的交易ID列表
      * @return BatchDeleteResult 包含成功/失败数量
      */
-    suspend fun deleteExpensesBatch(ids: List<Long>): BatchDeleteResult {
+    override suspend fun deleteExpensesBatch(ids: List<Long>): BatchDeleteResult {
         if (ids.isEmpty()) {
             return BatchDeleteResult(0, 0, emptyList())
         }
@@ -402,7 +547,7 @@ class TransactionRepository private constructor(context: Context) {
      * @param ids 要删除的交易ID列表
      * @return BatchDeleteResult 包含成功/失败数量
      */
-    suspend fun deleteExpensesBatchBestEffort(ids: List<Long>): BatchDeleteResult {
+    override suspend fun deleteExpensesBatchBestEffort(ids: List<Long>): BatchDeleteResult {
         if (ids.isEmpty()) {
             return BatchDeleteResult(0, 0, emptyList())
         }
@@ -431,7 +576,7 @@ class TransactionRepository private constructor(context: Context) {
      * @param beforeTimestamp 时间戳（毫秒）
      * @return 删除的记录数
      */
-    suspend fun deleteExpensesBeforeDate(beforeTimestamp: Long): Int {
+    override suspend fun deleteExpensesBeforeDate(beforeTimestamp: Long): Int {
         return expenseDao.deleteBeforeDate(beforeTimestamp)
     }
 
@@ -440,9 +585,58 @@ class TransactionRepository private constructor(context: Context) {
      * @param beforeTimestamp 时间戳（毫秒）
      * @return 记录数
      */
-    suspend fun countExpensesBeforeDate(beforeTimestamp: Long): Int {
+    override suspend fun countExpensesBeforeDate(beforeTimestamp: Long): Int {
         return expenseDao.countBeforeDate(beforeTimestamp)
     }
+
+    // ==================== v1.9.6 新增查询 ====================
+
+    /**
+     * 按渠道获取交易记录
+     * 使用 idx_channel 索引优化查询
+     * @param channel 渠道名称（如 "微信支付", "支付宝"）
+     * @param limit 返回记录数限制
+     */
+    override fun getByChannel(channel: String, limit: Int): Flow<List<ExpenseEntity>> =
+        expenseDao.getByChannel(channel, limit).map { list ->
+            list.map { decryptEntity(it) }
+        }
+
+    /**
+     * 获取大额支出交易
+     * 使用 idx_amount_type 索引优化查询
+     * @param minAmount 最小金额阈值
+     * @param limit 返回记录数限制
+     */
+    override fun getLargeExpenses(minAmount: Double, limit: Int): Flow<List<ExpenseEntity>> =
+        expenseDao.getLargeExpenses(minAmount, limit).map { list ->
+            list.map { decryptEntity(it) }
+        }
+
+    /**
+     * 获取分类统计（带数量）
+     * 使用 idx_stats 复合索引优化
+     * @param type 类型（expense/income）
+     * @param start 开始时间戳
+     * @param end 结束时间戳
+     * @param limit 返回分类数限制
+     */
+    override fun getCategoryStatsWithCount(
+        type: String,
+        start: Long,
+        end: Long,
+        limit: Int
+    ): Flow<List<CategoryStatWithCount>> =
+        expenseDao.getCategoryStatsWithCount(type, start, end, limit)
+
+    /**
+     * 获取月度趋势统计
+     * 用于年度报表展示
+     * @param start 开始时间戳
+     * @param end 结束时间戳
+     */
+    override fun getMonthlyTrend(start: Long, end: Long): Flow<List<MonthlyTrendStat>> =
+        expenseDao.getMonthlyTrend(start, end)
 
     // ========== 加密/解密辅助方法 ==========
 

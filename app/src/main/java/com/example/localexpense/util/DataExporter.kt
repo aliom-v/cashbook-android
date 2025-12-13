@@ -8,10 +8,14 @@ import android.os.Environment
 import android.provider.MediaStore
 import com.example.localexpense.data.ExpenseEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
+import java.io.BufferedWriter
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+import java.io.OutputStreamWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -24,15 +28,24 @@ import java.util.Locale
  * 2. 导出为 Excel 兼容格式 (TSV)
  * 3. 支持自定义导出范围
  * 4. 支持多种存储位置
+ * 5. 流式导出支持大数据量（v1.9.0）
  *
  * 使用场景：
  * - 用户数据备份
  * - 数据分析导出
  * - 与其他应用数据交换
+ *
+ * 性能优化 v1.9.0：
+ * - 添加流式导出，支持大数据量
+ * - 使用 BufferedWriter 提高写入效率
+ * - 分批处理避免 OOM
  */
 object DataExporter {
 
     private const val TAG = "DataExporter"
+
+    // 流式导出批次大小
+    private const val STREAM_BATCH_SIZE = 100
 
     // 导出格式
     enum class ExportFormat {
@@ -342,6 +355,243 @@ object DataExporter {
             Logger.e(TAG, "导出到流失败", e)
             ExportResult.Failure("导出失败: ${e.message}", e)
         }
+    }
+
+    // ==================== 流式导出（v1.9.0）====================
+
+    /**
+     * 导出进度
+     */
+    data class ExportProgress(
+        val current: Int,
+        val total: Int,
+        val percentage: Int = if (total > 0) (current * 100 / total) else 0
+    )
+
+    /**
+     * 流式导出交易记录（适用于大数据量）
+     *
+     * @param context 上下文
+     * @param transactions 交易列表
+     * @param options 导出选项
+     * @return Flow<ExportProgress> 导出进度
+     */
+    fun exportTransactionsStreaming(
+        context: Context,
+        transactions: List<ExpenseEntity>,
+        options: ExportOptions = ExportOptions()
+    ): Flow<ExportProgress> = flow {
+        if (transactions.isEmpty()) {
+            emit(ExportProgress(0, 0, 100))
+            return@flow
+        }
+
+        val total = transactions.size
+        var exported = 0
+
+        // 生成文件名
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val extension = when (options.format) {
+            ExportFormat.CSV -> "csv"
+            ExportFormat.TSV -> "tsv"
+            ExportFormat.JSON -> "json"
+        }
+        val fileName = options.customFileName ?: "expense_export_$timestamp.$extension"
+
+        // 创建输出流
+        val outputStream = createOutputStream(context, fileName, options)
+
+        try {
+            BufferedWriter(OutputStreamWriter(outputStream, options.encoding)).use { writer ->
+                // 写入 BOM
+                if (options.format != ExportFormat.JSON) {
+                    writer.write("\uFEFF")
+                }
+
+                // 写入头部
+                when (options.format) {
+                    ExportFormat.CSV -> writeCsvHeader(writer, options)
+                    ExportFormat.TSV -> writeTsvHeader(writer, options)
+                    ExportFormat.JSON -> writeJsonHeader(writer, total)
+                }
+
+                val dateFormat = SimpleDateFormat(options.dateFormat, Locale.getDefault())
+
+                // 分批写入数据
+                transactions.chunked(STREAM_BATCH_SIZE).forEachIndexed { batchIndex, batch ->
+                    batch.forEachIndexed { indexInBatch, tx ->
+                        val globalIndex = batchIndex * STREAM_BATCH_SIZE + indexInBatch
+                        when (options.format) {
+                            ExportFormat.CSV -> writeCsvRow(writer, tx, options, dateFormat)
+                            ExportFormat.TSV -> writeTsvRow(writer, tx, options, dateFormat)
+                            ExportFormat.JSON -> writeJsonRow(writer, tx, options, dateFormat, globalIndex, total)
+                        }
+                        exported++
+                    }
+
+                    // 每批次刷新并报告进度
+                    writer.flush()
+                    emit(ExportProgress(exported, total))
+                }
+
+                // 写入尾部
+                if (options.format == ExportFormat.JSON) {
+                    writeJsonFooter(writer)
+                }
+
+                writer.flush()
+            }
+
+            Logger.i(TAG, "流式导出成功: $fileName, $exported 条记录")
+            emit(ExportProgress(exported, total, 100))
+
+        } catch (e: Exception) {
+            Logger.e(TAG, "流式导出失败", e)
+            throw e
+        }
+    }
+
+    /**
+     * 创建输出流
+     */
+    private fun createOutputStream(context: Context, fileName: String, options: ExportOptions): OutputStream {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            createMediaStoreOutputStream(context, fileName)
+        } else {
+            createLegacyOutputStream(fileName)
+        }
+    }
+
+    private fun createMediaStoreOutputStream(context: Context, fileName: String): OutputStream {
+        val mimeType = when {
+            fileName.endsWith(".csv") -> "text/csv"
+            fileName.endsWith(".tsv") -> "text/tab-separated-values"
+            fileName.endsWith(".json") -> "application/json"
+            else -> "text/plain"
+        }
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+            put(MediaStore.Downloads.MIME_TYPE, mimeType)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/LocalExpense")
+            }
+        }
+
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+            ?: throw Exception("无法创建文件")
+
+        return resolver.openOutputStream(uri) ?: throw Exception("无法打开输出流")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun createLegacyOutputStream(fileName: String): OutputStream {
+        val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val exportDir = File(downloadDir, "LocalExpense")
+        if (!exportDir.exists()) {
+            exportDir.mkdirs()
+        }
+        val file = File(exportDir, fileName)
+        return FileOutputStream(file)
+    }
+
+    // ==================== 流式写入方法 ====================
+
+    private fun writeCsvHeader(writer: BufferedWriter, options: ExportOptions) {
+        if (!options.includeHeader) return
+        val headers = mutableListOf("ID", "金额", "类型", "商户", "分类", "渠道", "时间")
+        if (options.includeNote) headers.add("备注")
+        writer.write(headers.joinToString(",") { escapeCsv(it) })
+        writer.newLine()
+    }
+
+    private fun writeCsvRow(writer: BufferedWriter, tx: ExpenseEntity, options: ExportOptions, dateFormat: SimpleDateFormat) {
+        val typeText = if (tx.type == "income") "收入" else "支出"
+        val row = mutableListOf(
+            tx.id.toString(),
+            String.format("%.2f", tx.amount),
+            typeText,
+            tx.merchant,
+            tx.category,
+            tx.channel,
+            dateFormat.format(Date(tx.timestamp))
+        )
+        if (options.includeNote) row.add(tx.note ?: "")
+        writer.write(row.joinToString(",") { escapeCsv(it) })
+        writer.newLine()
+    }
+
+    private fun writeTsvHeader(writer: BufferedWriter, options: ExportOptions) {
+        if (!options.includeHeader) return
+        val headers = mutableListOf("ID", "金额", "类型", "商户", "分类", "渠道", "时间")
+        if (options.includeNote) headers.add("备注")
+        writer.write(headers.joinToString("\t"))
+        writer.newLine()
+    }
+
+    private fun writeTsvRow(writer: BufferedWriter, tx: ExpenseEntity, options: ExportOptions, dateFormat: SimpleDateFormat) {
+        val typeText = if (tx.type == "income") "收入" else "支出"
+        val row = mutableListOf(
+            tx.id.toString(),
+            String.format("%.2f", tx.amount),
+            typeText,
+            tx.merchant,
+            tx.category,
+            tx.channel,
+            dateFormat.format(Date(tx.timestamp))
+        )
+        if (options.includeNote) row.add(tx.note ?: "")
+        writer.write(row.joinToString("\t") { escapeTsv(it) })
+        writer.newLine()
+    }
+
+    private fun writeJsonHeader(writer: BufferedWriter, total: Int) {
+        writer.write("{")
+        writer.newLine()
+        writer.write("  \"exportTime\": \"${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}\",")
+        writer.newLine()
+        writer.write("  \"recordCount\": $total,")
+        writer.newLine()
+        writer.write("  \"transactions\": [")
+        writer.newLine()
+    }
+
+    private fun writeJsonRow(writer: BufferedWriter, tx: ExpenseEntity, options: ExportOptions, dateFormat: SimpleDateFormat, index: Int, total: Int) {
+        val typeText = if (tx.type == "income") "income" else "expense"
+        writer.write("    {")
+        writer.newLine()
+        writer.write("      \"id\": ${tx.id},")
+        writer.newLine()
+        writer.write("      \"amount\": ${tx.amount},")
+        writer.newLine()
+        writer.write("      \"type\": \"$typeText\",")
+        writer.newLine()
+        writer.write("      \"merchant\": ${escapeJson(tx.merchant)},")
+        writer.newLine()
+        writer.write("      \"category\": ${escapeJson(tx.category)},")
+        writer.newLine()
+        writer.write("      \"channel\": ${escapeJson(tx.channel)},")
+        writer.newLine()
+        writer.write("      \"timestamp\": ${tx.timestamp},")
+        writer.newLine()
+        writer.write("      \"date\": \"${dateFormat.format(Date(tx.timestamp))}\"")
+        if (options.includeNote && !tx.note.isNullOrEmpty()) {
+            writer.write(",")
+            writer.newLine()
+            writer.write("      \"note\": ${escapeJson(tx.note)}")
+        }
+        writer.newLine()
+        writer.write("    }")
+        if (index < total - 1) writer.write(",")
+        writer.newLine()
+    }
+
+    private fun writeJsonFooter(writer: BufferedWriter) {
+        writer.write("  ]")
+        writer.newLine()
+        writer.write("}")
+        writer.newLine()
     }
 
     // ==================== 辅助方法 ====================

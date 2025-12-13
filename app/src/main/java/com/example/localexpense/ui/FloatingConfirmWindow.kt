@@ -40,9 +40,10 @@ class FloatingConfirmWindow(context: Context) {
 
     companion object {
         private const val TAG = "FloatingWindow"
-        private const val AUTO_DISMISS_DELAY_MS = 8000L  // 自动隐藏延迟
+        private const val AUTO_DISMISS_DELAY_MS = 10000L  // 优化：延长到10秒，给用户更多确认时间
         private const val WINDOW_Y_OFFSET = 100  // 距离顶部偏移量（像素）
         private const val ANIMATION_DURATION_MS = 300L  // 动画时长
+        private const val COUNTDOWN_WARNING_THRESHOLD = 3  // 倒计时警告阈值（最后3秒）
 
         fun hasPermission(context: Context): Boolean {
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -137,7 +138,19 @@ class FloatingConfirmWindow(context: Context) {
             val remaining = ((AUTO_DISMISS_DELAY_MS - elapsed) / 1000).toInt().coerceAtLeast(0)
 
             if (remaining > 0) {
-                countdownTextView?.text = "${remaining}秒后自动记录"
+                // 优化：最后3秒显示更醒目的提示
+                val text = if (remaining <= COUNTDOWN_WARNING_THRESHOLD) {
+                    "⚠️ ${remaining}秒后自动记录"
+                } else {
+                    "${remaining}秒后自动记录"
+                }
+                countdownTextView?.text = text
+
+                // 最后3秒时改变文字颜色（如果可能）
+                if (remaining <= COUNTDOWN_WARNING_THRESHOLD) {
+                    countdownTextView?.setTextColor(android.graphics.Color.parseColor("#FF5722"))
+                }
+
                 handler.postDelayed(this, 500)  // 更频繁更新以提高精度
             } else {
                 countdownTextView?.text = "正在记录..."

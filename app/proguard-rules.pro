@@ -89,6 +89,24 @@
 }
 
 # ==================== 第三方库 ====================
+# Hilt / Dagger
+-dontwarn dagger.hilt.**
+-keep class dagger.hilt.** { *; }
+-keep class javax.inject.** { *; }
+-keep class * extends dagger.hilt.android.internal.managers.ComponentSupplier { *; }
+-keep class * extends dagger.hilt.android.internal.managers.ViewComponentManager$FragmentContextWrapper { *; }
+-keep class * implements dagger.hilt.internal.GeneratedComponent { *; }
+-keep class * implements dagger.hilt.internal.GeneratedComponentManager { *; }
+-keepclasseswithmembers class * {
+    @dagger.hilt.* <methods>;
+}
+-keepclasseswithmembers class * {
+    @javax.inject.* <methods>;
+}
+-keepclasseswithmembers class * {
+    @javax.inject.* <fields>;
+}
+
 # Google ML Kit Text Recognition
 -keep class com.google.mlkit.** { *; }
 -keep class com.google.android.gms.** { *; }
@@ -208,6 +226,37 @@
 -keep class com.example.localexpense.ui.UiEvent$* { *; }
 -keep class com.example.localexpense.ui.UserIntent { *; }
 -keep class com.example.localexpense.ui.UserIntent$* { *; }
+
+# ==================== Domain 层（v1.9.5 新增） ====================
+# UseCase 类（Hilt 注入）
+-keep class com.example.localexpense.domain.TransactionUseCases { *; }
+-keep class com.example.localexpense.domain.StatisticsUseCases { *; }
+-keep class com.example.localexpense.domain.CategoryUseCases { *; }
+-keep class com.example.localexpense.domain.BudgetUseCases { *; }
+
+# Repository 接口
+-keep interface com.example.localexpense.domain.repository.ITransactionRepository { *; }
+
+# Service 接口
+-keep interface com.example.localexpense.domain.service.ICryptoService { *; }
+-keep interface com.example.localexpense.domain.service.IDuplicateDetector { *; }
+-keep class com.example.localexpense.domain.service.DuplicateStats { *; }
+
+# Result 类
+-keep class com.example.localexpense.domain.Result { *; }
+-keep class com.example.localexpense.domain.Result$* { *; }
+
+# ==================== DI 模块（v1.9.5 新增） ====================
+# Hilt Modules
+-keep class com.example.localexpense.di.DatabaseModule { *; }
+-keep class com.example.localexpense.di.AppModule { *; }
+
+# EntryPoint 接口（非 Hilt 组件获取依赖）
+-keep interface com.example.localexpense.di.RepositoryEntryPoint { *; }
+
+# ==================== Batch 操作结果类 ====================
+-keep class com.example.localexpense.data.BatchInsertResult { *; }
+-keep class com.example.localexpense.data.BatchDeleteResult { *; }
 
 # ==================== EncryptedSharedPreferences ====================
 # Tink 加密库（EncryptedSharedPreferences 依赖）

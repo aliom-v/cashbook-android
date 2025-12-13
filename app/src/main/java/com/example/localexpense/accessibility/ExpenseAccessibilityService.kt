@@ -16,6 +16,7 @@ import com.example.localexpense.BuildConfig
 import com.example.localexpense.R
 import com.example.localexpense.data.ExpenseEntity
 import com.example.localexpense.data.TransactionRepository
+import com.example.localexpense.di.RepositoryEntryPoint
 import com.example.localexpense.ocr.OcrParser
 import com.example.localexpense.ocr.ScreenCaptureManager
 import com.example.localexpense.parser.RuleEngine
@@ -23,6 +24,7 @@ import com.example.localexpense.parser.TransactionParser
 import com.example.localexpense.ui.FloatingConfirmWindow
 import com.example.localexpense.ui.MainActivity
 import com.example.localexpense.util.*
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -50,23 +52,27 @@ class ExpenseAccessibilityService : AccessibilityService() {
         // 监听的App包名
         private val MONITORED_PACKAGES = PackageNames.MONITORED_PACKAGES
 
-        // 看门狗检查间隔
-        private const val WATCHDOG_INTERVAL_MS = 30_000L
+        // 看门狗检查间隔（优化：缩短到20秒，更快检测问题）
+        private const val WATCHDOG_INTERVAL_MS = 20_000L
 
         // 心跳检测间隔
         private const val HEARTBEAT_INTERVAL_MS = 60_000L
 
-        // 最大连续异常次数（超过则重新初始化）
-        private const val MAX_CONSECUTIVE_ERRORS = 5
+        // 最大连续异常次数（优化：降低到3次，更快触发恢复）
+        private const val MAX_CONSECUTIVE_ERRORS = 3
 
-        // 重新初始化冷却时间（毫秒）
-        private const val REINIT_COOLDOWN_MS = 60_000L
+        // 重新初始化冷却时间（优化：降低到30秒，更快恢复）
+        private const val REINIT_COOLDOWN_MS = 30_000L
 
         // 最大重新初始化尝试次数
-        private const val MAX_REINIT_ATTEMPTS = 3
+        private const val MAX_REINIT_ATTEMPTS = 5
 
-        // 文本收集超时时间（毫秒）
+        // 文本收集超时时间（毫秒）- 基础超时
         private const val TEXT_COLLECT_TIMEOUT_MS = 2000L
+        // 复杂页面额外超时时间
+        private const val TEXT_COLLECT_TIMEOUT_EXTRA_MS = 1000L
+        // 触发额外超时的节点数阈值
+        private const val COMPLEX_PAGE_NODE_THRESHOLD = 50
 
         // 服务状态（用于外部查询）
         @Volatile
@@ -130,8 +136,14 @@ class ExpenseAccessibilityService : AccessibilityService() {
     private var floatingWindow: FloatingConfirmWindow? = null
     private var screenCaptureManager: ScreenCaptureManager? = null
 
-    // 防重复检测器
-    private val duplicateChecker by lazy { DuplicateChecker.getInstance() }
+    // 防重复检测器（使用 EntryPoint 获取 Hilt 管理的单例）
+    private val duplicateChecker by lazy {
+        val entryPoint = EntryPointAccessors.fromApplication(
+            applicationContext,
+            RepositoryEntryPoint::class.java
+        )
+        entryPoint.duplicateChecker()
+    }
 
     // 通知ID计数器
     private val notifyIdCounter = AtomicInteger(100)
@@ -261,8 +273,12 @@ class ExpenseAccessibilityService : AccessibilityService() {
      */
     private fun initializeComponents() {
         try {
-            // 1. 初始化 Repository
-            repository = TransactionRepository.getInstance(applicationContext)
+            // 1. 通过 EntryPoint 获取 Repository（Hilt 管理的单例）
+            val entryPoint = EntryPointAccessors.fromApplication(
+                applicationContext,
+                RepositoryEntryPoint::class.java
+            )
+            repository = entryPoint.transactionRepository()
             Logger.d(TAG) { "Repository 初始化完成" }
 
             // 2. 初始化规则引擎
@@ -338,28 +354,36 @@ class ExpenseAccessibilityService : AccessibilityService() {
                         val timeSinceLastReinit = now - lastReinitTime.get()
                         val attempts = reinitAttempts.get()
 
+                        // 分级冷却机制：随着尝试次数增加，冷却时间指数增长
+                        // 第1次: 30秒, 第2次: 60秒, 第3次: 120秒, 第4次: 240秒, 第5次: 300秒（封顶）
+                        val currentCooldown = minOf(
+                            REINIT_COOLDOWN_MS * (1L shl attempts.coerceAtMost(4)),
+                            300_000L  // 最长5分钟冷却
+                        )
+
                         if (attempts >= MAX_REINIT_ATTEMPTS) {
-                            // 达到最大尝试次数，等待更长的冷却时间
-                            if (timeSinceLastReinit > REINIT_COOLDOWN_MS * 5) {
+                            // 达到最大尝试次数，等待更长的冷却时间后重置计数器
+                            if (timeSinceLastReinit > 600_000L) {  // 10分钟后重置
                                 Logger.w(TAG, "重置重新初始化计数器")
                                 reinitAttempts.set(0)
                             } else {
                                 Logger.w(TAG, "已达最大重新初始化次数($attempts)，等待冷却")
                             }
-                        } else if (timeSinceLastReinit > REINIT_COOLDOWN_MS) {
-                            Logger.w(TAG, "尝试重新初始化 (第${attempts + 1}次)")
+                        } else if (timeSinceLastReinit > currentCooldown) {
+                            Logger.w(TAG, "尝试重新初始化 (第${attempts + 1}次，冷却时间=${currentCooldown/1000}秒)")
                             lastReinitTime.set(now)
                             reinitAttempts.incrementAndGet()
                             consecutiveErrors.set(0)
                             workerHandler?.post { reinitializeComponents() }
                         } else {
-                            Logger.d(TAG) { "等待冷却时间: ${(REINIT_COOLDOWN_MS - timeSinceLastReinit) / 1000}秒" }
+                            val remainingCooldown = (currentCooldown - timeSinceLastReinit) / 1000
+                            Logger.d(TAG) { "等待冷却时间: ${remainingCooldown}秒 (第${attempts + 1}次尝试需等待${currentCooldown/1000}秒)" }
                         }
                     }
 
-                    // 检查是否长时间没有成功处理
+                    // 检查是否长时间没有成功处理（优化：缩短到3分钟）
                     val timeSinceLastSuccess = now - lastSuccessTime.get()
-                    if (timeSinceLastSuccess > 5 * 60 * 1000 && isInitialized.get()) {
+                    if (timeSinceLastSuccess > 3 * 60 * 1000 && isInitialized.get()) {
                         Logger.w(TAG, "长时间无成功处理(${timeSinceLastSuccess/1000}秒)，检查服务状态")
                         // 重置规则引擎
                         try {
@@ -397,7 +421,11 @@ class ExpenseAccessibilityService : AccessibilityService() {
                     // 检查关键组件状态
                     if (repository == null && isInitialized.get()) {
                         Logger.w(TAG, "检测到 Repository 为空，尝试恢复")
-                        repository = TransactionRepository.getInstance(applicationContext)
+                        val entryPoint = EntryPointAccessors.fromApplication(
+                            applicationContext,
+                            RepositoryEntryPoint::class.java
+                        )
+                        repository = entryPoint.transactionRepository()
                     }
 
                     // 检查事件处理延迟
@@ -554,7 +582,15 @@ class ExpenseAccessibilityService : AccessibilityService() {
             }
 
         } catch (e: Exception) {
-            Logger.e(TAG, "处理窗口事件异常", e)
+            // 分类记录异常，便于问题定位
+            val exceptionType = when (e) {
+                is android.database.sqlite.SQLiteException -> "数据库错误"
+                is IllegalStateException -> "状态异常"
+                is SecurityException -> "权限错误"
+                is NullPointerException -> "空指针"
+                else -> "未知错误"
+            }
+            Logger.e(TAG, "处理窗口事件异常[$exceptionType]", e)
             consecutiveErrors.incrementAndGet()
         } finally {
             recycleNodeSafely(root)
@@ -653,14 +689,15 @@ class ExpenseAccessibilityService : AccessibilityService() {
                         }
                     },
                     onDismiss = {
-                        // 用户取消，释放处理权，允许下次再次检测
+                        // 用户取消，释放处理权并添加冷却时间，防止立即重新触发
                         duplicateChecker.releaseProcessing(
                             transaction.amount,
                             transaction.merchant,
                             transaction.type,
-                            transaction.channel
+                            transaction.channel,
+                            addCooldown = true  // 添加冷却时间
                         )
-                        Logger.d(TAG) { "用户取消记账，已释放处理权" }
+                        Logger.d(TAG) { "用户取消记账，已释放处理权并添加冷却" }
                     }
                 )
             } else {
@@ -826,7 +863,14 @@ class ExpenseAccessibilityService : AccessibilityService() {
                     transaction.type,
                     transaction.channel
                 )
-                Logger.e(TAG, "保存交易异常，已释放处理权", e)
+                // 分类记录异常
+                val exceptionType = when (e) {
+                    is android.database.sqlite.SQLiteException -> "数据库错误"
+                    is java.io.IOException -> "IO错误"
+                    is IllegalStateException -> "状态异常"
+                    else -> "未知错误"
+                }
+                Logger.e(TAG, "保存交易异常[$exceptionType]，已释放处理权", e)
                 withContext(Dispatchers.Main) {
                     showNotificationSafely("记账失败", "发生异常: ${e.message}")
                 }
@@ -860,9 +904,16 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
     /**
      * 快速检查是否可能是交易页面
+     * 优化：增加更多关键词覆盖，确保不漏掉有效交易页面
      */
     private fun quickCheckForTransaction(root: AccessibilityNodeInfo): Boolean {
-        val keywords = listOf("￥", "¥", "元", "红包", "转账", "支付")
+        // 扩展关键词列表，覆盖更多场景
+        val keywords = listOf(
+            "￥", "¥", "元",           // 金额标识
+            "红包", "转账", "支付",     // 交易类型
+            "成功", "完成", "到账",     // 结果状态
+            "收款", "付款", "扣款"      // 操作类型
+        )
         for (keyword in keywords) {
             try {
                 val nodes = root.findAccessibilityNodeInfosByText(keyword)
@@ -907,16 +958,24 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
         var currentNodeCount = nodeCount + 1
 
-        // 超时检查（每处理一定数量节点检查一次）
-        if (currentNodeCount % 20 == 0) {
-            if (System.currentTimeMillis() - startTime > TEXT_COLLECT_TIMEOUT_MS) {
-                Logger.w(TAG, "文本收集超时，已收集 ${list.size} 条")
+        // 优化：动态超时机制
+        // 基础超时为2秒，复杂页面（节点数>50）额外增加1秒
+        val dynamicTimeout = if (currentNodeCount > COMPLEX_PAGE_NODE_THRESHOLD) {
+            TEXT_COLLECT_TIMEOUT_MS + TEXT_COLLECT_TIMEOUT_EXTRA_MS
+        } else {
+            TEXT_COLLECT_TIMEOUT_MS
+        }
+
+        // 更频繁地检查超时（每 10 个节点检查一次）
+        if (currentNodeCount % 10 == 0) {
+            if (System.currentTimeMillis() - startTime > dynamicTimeout) {
+                Logger.w(TAG, "文本收集超时(${dynamicTimeout}ms)，已收集 ${list.size} 条，节点数=$currentNodeCount")
                 return currentNodeCount
             }
         }
 
-        // 内存压力检查（每处理 50 个节点检查一次，避免频繁检查开销）
-        if (currentNodeCount % 50 == 0) {
+        // 内存压力检查（每处理 30 个节点检查一次，而不是 50 个）
+        if (currentNodeCount % 30 == 0) {
             val runtime = Runtime.getRuntime()
             val usedMemory = runtime.totalMemory() - runtime.freeMemory()
             val maxMemory = runtime.maxMemory()
@@ -934,6 +993,13 @@ class ExpenseAccessibilityService : AccessibilityService() {
             node.contentDescription?.toString()?.trim()?.takeIf {
                 it.isNotEmpty() && it.length < Constants.MAX_SINGLE_TEXT_LENGTH
             }?.let { list.add(it) }
+
+            // 优化：也获取 hintText，某些输入框的提示文本可能包含金额信息
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                node.hintText?.toString()?.trim()?.takeIf {
+                    it.isNotEmpty() && it.length < Constants.MAX_SINGLE_TEXT_LENGTH
+                }?.let { list.add(it) }
+            }
 
             val childCount = node.childCount.coerceAtMost(Constants.MAX_CHILD_NODE_COUNT)
             for (i in 0 until childCount) {
@@ -956,7 +1022,9 @@ class ExpenseAccessibilityService : AccessibilityService() {
 
     /**
      * 安全回收节点
+     * 注意：recycle() 在 Android 13+ 废弃，系统自动管理节点生命周期
      */
+    @Suppress("DEPRECATION")
     private fun recycleNodeSafely(node: AccessibilityNodeInfo?) {
         if (node == null) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return

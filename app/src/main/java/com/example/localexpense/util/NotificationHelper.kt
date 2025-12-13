@@ -11,6 +11,7 @@ import androidx.annotation.DrawableRes
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.example.localexpense.R
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 通知管理工具类
@@ -40,9 +41,29 @@ object NotificationHelper {
     // 通知 ID
     object NotificationIds {
         const val FOREGROUND_SERVICE = 1
-        const val TRANSACTION_RECORDED = 100
+        const val TRANSACTION_RECORDED = 100  // 交易通知ID起始范围: 100-199
         const val BUDGET_WARNING = 200
         const val ERROR = 300
+
+        // 交易通知ID范围
+        private const val TRANSACTION_ID_MIN = 100
+        private const val TRANSACTION_ID_MAX = 199
+
+        // 原子计数器，用于生成唯一的交易通知ID
+        private val transactionIdCounter = AtomicInteger(TRANSACTION_ID_MIN)
+
+        /**
+         * 获取下一个交易通知ID
+         * 使用原子计数器循环生成 100-199 范围内的唯一ID
+         */
+        fun nextTransactionId(): Int {
+            val id = transactionIdCounter.getAndIncrement()
+            // 循环使用ID范围
+            if (transactionIdCounter.get() > TRANSACTION_ID_MAX) {
+                transactionIdCounter.compareAndSet(transactionIdCounter.get(), TRANSACTION_ID_MIN)
+            }
+            return id
+        }
     }
 
     /**
@@ -99,14 +120,18 @@ object NotificationHelper {
 
     /**
      * 构建前台服务通知
+     * 优化：添加监听状态摘要
      */
     fun buildForegroundNotification(
         context: Context,
-        contentIntent: PendingIntent? = null
+        contentIntent: PendingIntent? = null,
+        statusText: String? = null  // 可选的状态文本
     ): Notification {
+        val text = statusText ?: context.getString(R.string.notification_foreground_text)
+
         return NotificationCompat.Builder(context, Channels.FOREGROUND_SERVICE)
             .setContentTitle(context.getString(R.string.notification_foreground_title))
-            .setContentText(context.getString(R.string.notification_foreground_text))
+            .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .setShowWhen(false)
@@ -114,6 +139,8 @@ object NotificationHelper {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(contentIntent)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            // 优化：添加子文本显示更多信息
+            .setSubText("点击查看记账详情")
             .build()
     }
 
@@ -150,7 +177,7 @@ object NotificationHelper {
 
         try {
             NotificationManagerCompat.from(context)
-                .notify(NotificationIds.TRANSACTION_RECORDED + System.currentTimeMillis().toInt() % 100, notification)
+                .notify(NotificationIds.nextTransactionId(), notification)
         } catch (e: SecurityException) {
             Logger.e(TAG, "显示通知失败: 权限被拒绝", e)
         }

@@ -1,5 +1,6 @@
 package com.example.localexpense.parser
 
+import com.example.localexpense.accessibility.TransactionDiagnostics
 import com.example.localexpense.data.ExpenseEntity
 import com.example.localexpense.util.AmountUtils
 import com.example.localexpense.util.Channel
@@ -24,6 +25,11 @@ import java.util.regex.Pattern
  * - BigDecimal 精确金额解析
  * - 多模式金额匹配
  * - 完善的边界检查
+ *
+ * 性能优化 v1.8.2：
+ * - 关键词集合预编译为高效查找结构
+ * - 快速预检查减少不必要的遍历
+ * - 金额模式按优先级排序，命中后立即返回
  */
 object TransactionParser {
 
@@ -33,6 +39,10 @@ object TransactionParser {
     private const val MAX_TEXT_LENGTH_FOR_AMOUNT = 20  // 用于金额提取的最大文本长度
     private const val MIN_MERCHANT_LENGTH = 1
     private const val MAX_PARSE_TIME_MS = 50L  // 解析耗时警告阈值
+
+    // 快速预检查字符（v1.8.2）
+    // 如果文本不包含这些字符，可以快速跳过
+    private val QUICK_CHECK_CHARS = charArrayOf('￥', '¥', '元', '成', '付', '收', '转', '红', '退')
 
     // 金额匹配模式（按优先级排序，带货币符号的优先）
     private val amountPatterns = listOf(
@@ -60,12 +70,39 @@ object TransactionParser {
         Pattern.compile("([0-9,]+(?:\\.[0-9]{1,2})?)\\s*元")
     )
 
-    // 排除时间格式
-    private val timePattern = Pattern.compile("^\\d{1,2}[:.：]\\d{2}$")
-    private val timeDotPattern = Pattern.compile("^([01]?\\d|2[0-3])\\.([0-5]\\d)$")
+    // 排除时间格式（扩展支持更多格式）
+    private val timePattern = Pattern.compile("^\\d{1,2}[:.：]\\d{2}(:\\d{2})?$")  // HH:MM 或 HH:MM:SS
+    private val timeDotPattern = Pattern.compile("^([01]?\\d|2[0-3])\\.([0-5]\\d)$")  // H.MM
+    private val timeRangePattern = Pattern.compile("^\\d{1,2}[:.：]\\d{2}\\s*[-–—~]\\s*\\d{1,2}[:.：]\\d{2}$")  // 时间范围
+    private val time12HourPattern = Pattern.compile("^\\d{1,2}[:.：]\\d{2}\\s*[AaPp][Mm]$")  // 12小时制
 
     // 独立数字模式（用于兜底提取）
     private val standaloneNumberPattern = Pattern.compile("^([0-9]+(?:\\.[0-9]{1,2})?)$")
+
+    // ========== 商户提取预编译模式（v1.8.3 性能优化）==========
+    // 标签格式商户模式
+    private val merchantLabelPatterns = listOf(
+        Pattern.compile("(?:商户|商家|收款方|付款方|店铺)[：:]\\s*(.+?)(?:\\s|$)"),
+        Pattern.compile("(?:商户名称|商家名称)[：:]\\s*(.+?)(?:\\s|$)"),
+        Pattern.compile("(?:收款人|付款人)[：:]\\s*(.+?)(?:\\s|$)")
+    )
+
+    // 转账商户模式
+    private val transferMerchantPattern = Pattern.compile("收到(.+?)的转账")
+
+    // 支付商户模式
+    private val payToPattern = Pattern.compile("向(.+?)(?:付款|支付)")
+    private val consumePattern = Pattern.compile("在(.+?)消费")
+    private val dashPattern = Pattern.compile("^(.+?)\\s*[-–—]\\s*(?:支付|付款)")
+
+    // 通知商户模式
+    private val notificationMerchantPatterns = listOf(
+        Pattern.compile("(?:在|向)\\s*(.{1,20})\\s*(?:消费|付款|支付)"),
+        Pattern.compile("(?:收到)?(.{1,15})的红包"),
+        Pattern.compile("(.{1,15})向你转账"),
+        Pattern.compile("(?:商户|商家)[：:]\\s*(.{1,30})"),
+        Pattern.compile("来自\\s*(.{1,20})")
+    )
 
     // 收入关键词
     private val incomeKeywords = setOf(
@@ -81,11 +118,15 @@ object TransactionParser {
         "收钱成功", "到账成功", "转入成功", "收款到账",
         "转账已到账", "转账收款", "收到了转账", "已收到转账",
         "转账到账", "转账入账",
+        // 二维码收款（新增）
+        "二维码收款成功", "扫码收款成功", "收款码收款", "商家收款",
         // 退款
         "退款成功", "退款到账", "已退款", "退款已到账", "退款已存入",
         "已原路退回", "退款已入账", "退回成功", "退款中", "退款处理成功",
         // 支付宝特有
-        "余额宝收益", "收益到账", "利息到账"
+        "余额宝收益", "收益到账", "利息到账", "基金收益", "理财收益",
+        // 银行卡到账（新增）
+        "银行卡入账", "卡号入账", "工资到账", "薪资到账"
     )
 
     // 支出关键词
@@ -103,21 +144,40 @@ object TransactionParser {
         "连续包月", "自动续费", "订阅扣费",
         // 支付宝特有
         "花呗支付", "余额支付", "银行卡支付", "信用卡支付",
+        "花呗分期", "分期付款", "分期支付成功",
         // 云闪付特有
-        "交易成功", "刷卡成功", "银联支付"
+        "交易成功", "刷卡成功", "银联支付",
+        "碰一碰", "NFC支付", "闪付成功", "挥卡成功",
+        // 话费充值（新增）
+        "充值成功", "话费充值成功", "流量充值成功",
+        // 生活缴费（新增）
+        "缴费成功", "水费缴纳成功", "电费缴纳成功", "燃气缴费成功"
     )
 
     // 排除关键词（支付确认页面特征）
+    // v1.9.2: 优化排除关键词，减少误过滤
     private val excludeKeywords = setOf(
+        // 支付前确认页面
         "确认付款", "立即支付", "确认支付", "输入密码",
         "待支付", "去支付", "支付方式", "付款方式",
         "确认转账", "请输入", "去付款",
+        // 红包准备页面
         "选择红包个数", "请填写金额", "塞钱进红包", "添加表情",
-        // 增加更多排除关键词
-        "请确认", "验证", "指纹验证", "面容验证",
-        "选择付款方式", "更换付款方式", "添加银行卡",
-        "订单详情", "商品详情", "购买", "立即购买",
-        "加入购物车", "结算", "提交订单"
+        // 验证页面
+        "请确认", "指纹验证", "面容验证",
+        // 设置页面
+        "选择付款方式", "更换付款方式", "添加银行卡"
+        // 注意：移除了"订单详情"、"商品详情"、"购买"等，因为支付成功页面可能包含这些
+    )
+
+    // 强成功关键词（即使有排除关键词，也应该处理）
+    // v1.9.2 新增：更全面的成功状态关键词
+    private val strongSuccessKeywords = setOf(
+        // 明确的成功状态
+        "成功", "完成", "到账", "已入账",
+        // 已完成状态
+        "已支付", "已付款", "已收款", "已转账", "已领取", "已收钱",
+        "已扣款", "已自动扣款", "已存入", "已到账", "已退款"
     )
 
     // 发红包关键词（支出，优先级最高）
@@ -164,40 +224,122 @@ object TransactionParser {
 
     /**
      * 内部解析逻辑
+     * 优化：添加快速预检查，减少不必要的计算
+     * v1.9.2: 添加诊断记录
      */
     private fun parseInternal(texts: List<String>, packageName: String): ExpenseEntity? {
         // 合并文本用于关键词检测
         val joined = texts.joinToString(" | ")
+
+        // 快速预检查：如果不包含任何交易相关字符，直接返回
+        if (!quickCheck(joined)) {
+            TransactionDiagnostics.record(
+                TransactionDiagnostics.Stage.QUICK_CHECK,
+                packageName,
+                TransactionDiagnostics.Result.BLOCKED,
+                "文本不包含交易相关字符"
+            )
+            return null
+        }
+
+        TransactionDiagnostics.record(
+            TransactionDiagnostics.Stage.QUICK_CHECK,
+            packageName,
+            TransactionDiagnostics.Result.PASSED
+        )
 
         Logger.d(TAG) { "开始解析, 包名: $packageName, 文本数: ${texts.size}" }
 
         // 步骤 0: 检查排除关键词
         if (!shouldProcess(joined)) {
             Logger.d(TAG) { "检测到确认页面，跳过记录" }
+            TransactionDiagnostics.record(
+                TransactionDiagnostics.Stage.EXCLUDE_CHECK,
+                packageName,
+                TransactionDiagnostics.Result.BLOCKED,
+                "包含排除关键词且无成功状态"
+            )
             return null
         }
 
         // 步骤 1: 优先使用规则引擎匹配
         val ruleMatch = tryRuleEngine(texts, packageName, joined)
         if (ruleMatch != null) {
+            TransactionDiagnostics.record(
+                TransactionDiagnostics.Stage.RULE_ENGINE_MATCH,
+                packageName,
+                TransactionDiagnostics.Result.PASSED,
+                "规则引擎匹配成功",
+                ruleMatch.amount,
+                ruleMatch.merchant
+            )
             return ruleMatch
         }
 
         // 步骤 2: 降级到传统解析
-        return tryLegacyParse(texts, packageName, joined)
+        val legacyResult = tryLegacyParse(texts, packageName, joined)
+        if (legacyResult != null) {
+            TransactionDiagnostics.record(
+                TransactionDiagnostics.Stage.LEGACY_PARSE,
+                packageName,
+                TransactionDiagnostics.Result.PASSED,
+                "传统解析成功",
+                legacyResult.amount,
+                legacyResult.merchant
+            )
+        } else {
+            TransactionDiagnostics.record(
+                TransactionDiagnostics.Stage.LEGACY_PARSE,
+                packageName,
+                TransactionDiagnostics.Result.BLOCKED,
+                "未找到有效交易信息"
+            )
+        }
+        return legacyResult
+    }
+
+    /**
+     * 快速预检查（v1.8.2）
+     * 检查文本是否包含任何交易相关字符
+     */
+    private fun quickCheck(text: String): Boolean {
+        for (char in QUICK_CHECK_CHARS) {
+            if (text.indexOf(char) >= 0) {
+                return true
+            }
+        }
+        // 额外检查数字（可能是金额）
+        for (c in text) {
+            if (c.isDigit()) {
+                return true
+            }
+        }
+        return false
     }
 
     /**
      * 检查是否应该处理这个页面
+     * v1.9.2 优化：使用更智能的判断逻辑，减少漏记
      */
     private fun shouldProcess(joined: String): Boolean {
         val hasExcludeKeyword = excludeKeywords.any { joined.contains(it) }
         if (!hasExcludeKeyword) return true
 
-        // 如果有明确的成功关键词，仍然处理
+        // 如果有强成功关键词，应该处理
+        val hasStrongSuccess = strongSuccessKeywords.any { joined.contains(it) }
+        if (hasStrongSuccess) {
+            Logger.d(TAG) { "检测到排除关键词但有强成功状态，继续处理" }
+            return true
+        }
+
+        // 如果有明确的交易成功关键词，仍然处理
         val hasSuccessKeyword = sendRedPacketKeywords.any { joined.contains(it) } ||
                 expenseKeywords.any { joined.contains(it) } ||
                 incomeKeywords.any { joined.contains(it) }
+
+        if (hasSuccessKeyword) {
+            Logger.d(TAG) { "检测到排除关键词但有交易成功关键词，继续处理" }
+        }
 
         return hasSuccessKeyword
     }
@@ -358,6 +500,8 @@ object TransactionParser {
         // 排除时间格式（使用 SafeRegexMatcher）
         if (SafeRegexMatcher.matchesWithTimeout(timePattern, trimmed)) return null
         if (SafeRegexMatcher.matchesWithTimeout(timeDotPattern, trimmed)) return null
+        if (SafeRegexMatcher.matchesWithTimeout(timeRangePattern, trimmed)) return null
+        if (SafeRegexMatcher.matchesWithTimeout(time12HourPattern, trimmed)) return null
 
         // 匹配纯数字
         val result = SafeRegexMatcher.findWithTimeout(standaloneNumberPattern, trimmed)
@@ -381,17 +525,11 @@ object TransactionParser {
 
     /**
      * 从标签格式提取商户（如：商户：xxx、收款方：xxx）
-     * 优化：使用 SafeRegexMatcher 防止 ReDoS
+     * 优化：使用预编译的正则模式，防止 ReDoS
      */
     private fun tryExtractFromLabel(texts: List<String>): String? {
-        val labelPatterns = listOf(
-            Pattern.compile("(?:商户|商家|收款方|付款方|店铺)[：:]\\s*(.+?)(?:\\s|$)"),
-            Pattern.compile("(?:商户名称|商家名称)[：:]\\s*(.+?)(?:\\s|$)"),
-            Pattern.compile("(?:收款人|付款人)[：:]\\s*(.+?)(?:\\s|$)")
-        )
-
         for (text in texts) {
-            for (pattern in labelPatterns) {
+            for (pattern in merchantLabelPatterns) {
                 val result = SafeRegexMatcher.findWithTimeout(pattern, text)
                 if (result != null && result.matched) {
                     val name = result.group(1)?.trim()
@@ -440,40 +578,50 @@ object TransactionParser {
 
     /**
      * 从转账相关文本提取商户
+     * 修复：避免使用魔数，使用字符串长度计算
      */
     private fun tryExtractFromTransfer(texts: List<String>): String? {
         for (text in texts) {
             // "转账给XXX"
-            val transferToIdx = text.indexOf("转账给")
-            if (transferToIdx >= 0 && transferToIdx + 3 < text.length) {
-                val name = text.substring(transferToIdx + 3).trim()
-                if (isValidMerchantName(name)) return name
+            val transferToKeyword = "转账给"
+            val transferToIdx = text.indexOf(transferToKeyword)
+            if (transferToIdx >= 0) {
+                val startIdx = transferToIdx + transferToKeyword.length
+                if (startIdx < text.length) {
+                    val name = text.substring(startIdx).trim()
+                    if (isValidMerchantName(name)) return name
+                }
             }
 
             // "转给XXX"
-            val transferToIdx2 = text.indexOf("转给")
-            if (transferToIdx2 >= 0 && transferToIdx2 + 2 < text.length) {
-                val name = text.substring(transferToIdx2 + 2).trim()
-                if (isValidMerchantName(name)) return name
+            val transferToKeyword2 = "转给"
+            val transferToIdx2 = text.indexOf(transferToKeyword2)
+            if (transferToIdx2 >= 0) {
+                val startIdx = transferToIdx2 + transferToKeyword2.length
+                if (startIdx < text.length) {
+                    val name = text.substring(startIdx).trim()
+                    if (isValidMerchantName(name)) return name
+                }
             }
 
             // "XXX向你转账"
-            val transferFromIdx = text.indexOf("向你转账")
+            val transferFromKeyword = "向你转账"
+            val transferFromIdx = text.indexOf(transferFromKeyword)
             if (transferFromIdx > 0) {
                 val name = text.substring(0, transferFromIdx).trim()
                 if (isValidMerchantName(name)) return name
             }
 
             // "XXX给你转账"
-            val transferFromIdx2 = text.indexOf("给你转账")
+            val transferFromKeyword2 = "给你转账"
+            val transferFromIdx2 = text.indexOf(transferFromKeyword2)
             if (transferFromIdx2 > 0) {
                 val name = text.substring(0, transferFromIdx2).trim()
                 if (isValidMerchantName(name)) return name
             }
 
             // "收到XXX的转账"
-            val pattern = Pattern.compile("收到(.+?)的转账")
-            val result = SafeRegexMatcher.findWithTimeout(pattern, text)
+            val result = SafeRegexMatcher.findWithTimeout(transferMerchantPattern, text)
             if (result != null && result.matched) {
                 val name = result.group(1)?.trim()
                 if (!name.isNullOrBlank() && isValidMerchantName(name)) return name
@@ -484,12 +632,11 @@ object TransactionParser {
 
     /**
      * 从支付相关文本提取商户
-     * 优化：使用 SafeRegexMatcher 防止 ReDoS
+     * 优化：使用预编译的正则模式，防止 ReDoS
      */
     private fun tryExtractFromPayment(texts: List<String>): String? {
         for (text in texts) {
             // "向XXX付款"
-            val payToPattern = Pattern.compile("向(.+?)(?:付款|支付)")
             val payToResult = SafeRegexMatcher.findWithTimeout(payToPattern, text)
             if (payToResult != null && payToResult.matched) {
                 val name = payToResult.group(1)?.trim()
@@ -497,7 +644,6 @@ object TransactionParser {
             }
 
             // "在XXX消费"
-            val consumePattern = Pattern.compile("在(.+?)消费")
             val consumeResult = SafeRegexMatcher.findWithTimeout(consumePattern, text)
             if (consumeResult != null && consumeResult.matched) {
                 val name = consumeResult.group(1)?.trim()
@@ -505,7 +651,6 @@ object TransactionParser {
             }
 
             // "XXX-支付成功" 或 "XXX - 付款成功"
-            val dashPattern = Pattern.compile("^(.+?)\\s*[-–—]\\s*(?:支付|付款)")
             val dashResult = SafeRegexMatcher.findWithTimeout(dashPattern, text)
             if (dashResult != null && dashResult.matched) {
                 val name = dashResult.group(1)?.trim()
@@ -550,6 +695,7 @@ object TransactionParser {
 
     /**
      * 解析通知文本
+     * 优化：增加商户提取逻辑
      */
     fun parseNotification(text: String, packageName: String): ExpenseEntity? {
         if (text.isBlank()) return null
@@ -584,18 +730,8 @@ object TransactionParser {
         val type = determineType(text, isSendRedPacket, hasIncomeKeyword, hasExpenseKeyword, isRefund)
         val category = determineCategory(text)
 
-        // 根据渠道获取默认商户名
-        val channelName = when (packageName) {
-            PackageNames.WECHAT -> "微信"
-            PackageNames.ALIPAY -> "支付宝"
-            PackageNames.UNIONPAY -> "云闪付"
-            else -> "支付"
-        }
-        val merchant = when {
-            isRefund -> "退款"
-            isSendRedPacket -> "发出红包"
-            else -> channelName
-        }
+        // 尝试从通知文本中提取商户名
+        val merchant = extractMerchantFromNotification(text, packageName, isRefund, isSendRedPacket)
 
         return ExpenseEntity(
             id = 0,
@@ -609,6 +745,44 @@ object TransactionParser {
             note = "来自通知",
             rawText = text.take(Constants.RAW_TEXT_MAX_LENGTH)
         )
+    }
+
+    /**
+     * 从通知文本中提取商户名
+     * 优化：使用预编译的正则模式
+     */
+    private fun extractMerchantFromNotification(
+        text: String,
+        packageName: String,
+        isRefund: Boolean,
+        isSendRedPacket: Boolean
+    ): String {
+        // 尝试多种模式提取商户
+        for (pattern in notificationMerchantPatterns) {
+            val result = SafeRegexMatcher.findWithTimeout(pattern, text)
+            if (result != null && result.matched) {
+                val name = result.group(1)?.trim()
+                if (!name.isNullOrBlank() && name.length >= MIN_MERCHANT_LENGTH) {
+                    return sanitizeMerchant(name)
+                }
+            }
+        }
+
+        // 根据渠道和类型返回默认商户名
+        val channelName = when (packageName) {
+            PackageNames.WECHAT -> "微信"
+            PackageNames.ALIPAY -> "支付宝"
+            PackageNames.UNIONPAY -> "云闪付"
+            else -> "支付"
+        }
+
+        return when {
+            isRefund -> "退款"
+            isSendRedPacket -> "发出红包"
+            text.contains("红包") -> "${channelName}红包"
+            text.contains("转账") -> "${channelName}转账"
+            else -> channelName
+        }
     }
 
     /**

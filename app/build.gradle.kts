@@ -3,11 +3,19 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    id("kotlin-kapt")
+    alias(libs.plugins.hilt.android)
+    id("jacoco")  // v1.9.5: 代码覆盖率
 }
 
 // 导入需要的类
 import java.util.Properties
 import java.io.FileInputStream
+
+// Jacoco 配置
+jacoco {
+    toolVersion = "0.8.11"
+}
 
 android {
     namespace = "com.example.localexpense"
@@ -17,8 +25,8 @@ android {
         applicationId = "com.example.localexpense"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.8.0"
+        versionCode = 19
+        versionName = "1.9.10"
     }
 
     // 仅保留中文资源，减小 APK 体积
@@ -103,12 +111,63 @@ android {
         // 不检查致命问题（避免构建失败）
         checkReleaseBuilds = false
     }
+
+    // 单元测试配置
+    testOptions {
+        unitTests {
+            // 返回 Android 框架方法的默认值，避免 "Method not mocked" 错误
+            isReturnDefaultValues = true
+            // 启用覆盖率收集
+            isIncludeAndroidResources = true
+        }
+    }
+}
+
+// Jacoco 测试覆盖率报告任务 (v1.9.5)
+tasks.register<JacocoReport>("jacocoTestReport") {
+    dependsOn("testDebugUnitTest")
+
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+        csv.required.set(false)
+    }
+
+    val fileFilter = listOf(
+        "**/R.class",
+        "**/R$*.class",
+        "**/BuildConfig.*",
+        "**/Manifest*.*",
+        "**/*Test*.*",
+        "android/**/*.*",
+        // Hilt generated
+        "**/*_HiltModules*.*",
+        "**/*_Factory*.*",
+        "**/*_MembersInjector*.*",
+        "**/Hilt_*.*",
+        // Room generated
+        "**/*_Impl*.*",
+        "**/di/**"
+    )
+
+    val debugTree = fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/debug") {
+        exclude(fileFilter)
+    }
+
+    val mainSrc = "${project.projectDir}/src/main/java"
+
+    sourceDirectories.setFrom(files(mainSrc))
+    classDirectories.setFrom(files(debugTree))
+    executionData.setFrom(fileTree(layout.buildDirectory.get()) {
+        include("jacoco/testDebugUnitTest.exec")
+    })
 }
 
 dependencies {
     // Core
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
 
     // Compose
@@ -125,6 +184,11 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+
+    // Paging 3
+    implementation(libs.androidx.paging.runtime)
+    implementation(libs.androidx.paging.compose)
+    implementation(libs.androidx.room.paging)
 
     // Navigation
     implementation(libs.androidx.navigation.compose)
@@ -144,5 +208,18 @@ dependencies {
     // Security - Encryption (for rawText encryption)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // Hilt - Dependency Injection
+    implementation(libs.hilt.android)
+    kapt(libs.hilt.android.compiler)
+    implementation(libs.hilt.navigation.compose)
+
+    // Testing
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.2.1")
+    testImplementation("org.mockito:mockito-core:5.8.0")
+
+    // Debug tools
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.leakcanary.android)  // v1.9.5: 内存泄漏检测
 }

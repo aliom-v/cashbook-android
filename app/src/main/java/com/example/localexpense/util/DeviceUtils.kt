@@ -132,12 +132,15 @@ object DeviceUtils {
         val widthDp = displayMetrics.widthPixels / displayMetrics.density
         val heightDp = displayMetrics.heightPixels / displayMetrics.density
 
+        // v1.9.5: 使用 fontScale * density 替代废弃的 scaledDensity
+        val scaledDensity = configuration.fontScale * displayMetrics.density
+
         return ScreenInfo(
             widthPixels = displayMetrics.widthPixels,
             heightPixels = displayMetrics.heightPixels,
             density = displayMetrics.density,
             densityDpi = displayMetrics.densityDpi,
-            scaledDensity = displayMetrics.scaledDensity,
+            scaledDensity = scaledDensity,
             widthDp = widthDp,
             heightDp = heightDp,
             smallestWidthDp = configuration.smallestScreenWidthDp.toFloat(),

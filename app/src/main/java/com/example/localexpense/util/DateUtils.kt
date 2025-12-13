@@ -115,6 +115,26 @@ object DateUtils {
     }
 
     /**
+     * 获取当年时间范围
+     * @return Pair<年初时间戳, 年末时间戳>
+     */
+    fun getCurrentYearRange(): Pair<Long, Long> {
+        val calendar = Calendar.getInstance()
+        calendar.set(Calendar.MONTH, Calendar.JANUARY)
+        calendar.set(Calendar.DAY_OF_MONTH, 1)
+        calendar.set(Calendar.HOUR_OF_DAY, 0)
+        calendar.set(Calendar.MINUTE, 0)
+        calendar.set(Calendar.SECOND, 0)
+        calendar.set(Calendar.MILLISECOND, 0)
+        val yearStart = calendar.timeInMillis
+
+        calendar.add(Calendar.YEAR, 1)
+        val yearEnd = calendar.timeInMillis
+
+        return Pair(yearStart, yearEnd)
+    }
+
+    /**
      * 获取当前月份标识 (YYYYMM)
      */
     fun getCurrentMonthId(): Int {

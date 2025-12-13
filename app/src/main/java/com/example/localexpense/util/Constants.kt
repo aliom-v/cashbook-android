@@ -18,7 +18,7 @@ object Constants {
     // 原始文本最大长度
     const val RAW_TEXT_MAX_LENGTH = 300
 
-    // 搜索防抖延迟（毫秒）
+    // 搜索防抖延迟（毫秒）- 优化：300ms 平衡响应速度和输入体验
     const val SEARCH_DEBOUNCE_MS = 300L
 
     // 金额最大值（单笔交易上限，用于过滤异常值）
@@ -63,6 +63,24 @@ object Constants {
     // 数据库名称
     const val DATABASE_NAME = "local_expense.db"
 
+    // ========== 数据库查询限制 ==========
+
+    // 获取所有记录时的最大数量（防止 OOM）
+    // 注意：Room @Query 注解需要编译时常量，DAO 中的值应与此保持一致
+    const val QUERY_ALL_MAX_COUNT = 1000
+
+    // 搜索结果最大数量（防止 ANR）
+    const val SEARCH_MAX_RESULTS = 200
+
+    // 最近交易记录数量（首页展示）
+    const val RECENT_TRANSACTIONS_COUNT = 30
+
+    // 分页每页大小
+    const val PAGE_SIZE = 30
+
+    // 分页预加载距离
+    const val PREFETCH_DISTANCE = 10
+
     // 需要过滤的特殊号码（运营商客服、银行等）
     // 注意：只过滤明显不可能是消费金额的数字（5位以上客服号码）
     // 移除了可能是真实消费的金额（如12306铁路订票）
@@ -92,6 +110,15 @@ object Constants {
         // 常见误识别（6位数密码提示）
         123456.0  // 可能是密码提示
         // 注意：移除了 12306、12315、12345 等可能是真实消费金额的值
+    )
+
+    // 黑名单号码前缀（用于模糊匹配带小数的情况）
+    // 例如：10086.00、95588.12 等
+    val BLACKLIST_INTEGER_PREFIXES = setOf(
+        10086, 10010, 10000,  // 运营商
+        95588, 95533, 95566, 95555, 95568, 95599, 95528, 95558,
+        95561, 95508, 95516, 95559, 95595, 95511, 95526, 95577, 95580,  // 银行
+        123456  // 密码提示
     )
 }
 
@@ -163,6 +190,7 @@ object CategoryNames {
  * - 简单数字使用快速路径直接解析
  * - 复杂格式（带逗号）才使用 BigDecimal
  * - 预编译正则表达式避免重复编译
+ * - v1.8.1: 支持使用 RuleEngine 的配置化黑名单
  */
 object AmountUtils {
     private const val SCALE = 2 // 保留2位小数
@@ -253,6 +281,8 @@ object AmountUtils {
 
     /**
      * 验证金额是否有效
+     * v1.8.1: 优先使用 RuleEngine 的配置化黑名单，降级到硬编码检查
+     *
      * - 金额大于0
      * - 金额小于上限
      * - 不在黑名单中（如10086等特殊号码）
@@ -260,7 +290,37 @@ object AmountUtils {
     fun isValidAmount(amount: Double): Boolean {
         if (amount <= 0) return false
         if (amount > Constants.MAX_AMOUNT) return false
+
+        // 优先使用 RuleEngine 的配置化黑名单检查
+        try {
+            if (com.example.localexpense.parser.RuleEngine.isInitialized()) {
+                return !com.example.localexpense.parser.RuleEngine.isAmountBlacklisted(amount)
+            }
+        } catch (e: Exception) {
+            // RuleEngine 未初始化或出错，降级到硬编码检查
+        }
+
+        // 降级：使用硬编码黑名单检查
+        return isValidAmountFallback(amount)
+    }
+
+    /**
+     * 降级的金额验证（使用硬编码黑名单）
+     */
+    private fun isValidAmountFallback(amount: Double): Boolean {
+        // 精确匹配黑名单（快速路径）
         if (amount in Constants.BLACKLIST_AMOUNTS) return false
+
+        // 检查整数部分是否在黑名单前缀中
+        val integerPart = amount.toInt()
+        if (integerPart in Constants.BLACKLIST_INTEGER_PREFIXES) {
+            // 10000 是一个特殊值，作为整数消费很常见
+            if (integerPart == 10000) {
+                return amount != 10000.0
+            }
+            return false
+        }
+
         return true
     }
 }

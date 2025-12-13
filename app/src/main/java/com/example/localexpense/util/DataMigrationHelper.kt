@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.example.localexpense.BuildConfig
 import com.example.localexpense.data.TransactionRepository
+import com.example.localexpense.di.RepositoryEntryPoint
+import dagger.hilt.android.EntryPointAccessors
 
 /**
  * 数据迁移助手
@@ -158,7 +160,11 @@ object DataMigrationHelper {
      */
     suspend fun cleanOldData(context: Context, daysToKeep: Int): Int {
         val cutoffTime = System.currentTimeMillis() - (daysToKeep.toLong() * 24 * 60 * 60 * 1000)
-        val repository = TransactionRepository.getInstance(context)
+        val entryPoint = EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            RepositoryEntryPoint::class.java
+        )
+        val repository = entryPoint.transactionRepository()
 
         val count = repository.countExpensesBeforeDate(cutoffTime)
         if (count > 0) {
@@ -175,7 +181,11 @@ object DataMigrationHelper {
      * 获取数据统计信息
      */
     suspend fun getDataStats(context: Context): DataStats {
-        val repository = TransactionRepository.getInstance(context)
+        val entryPoint = EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            RepositoryEntryPoint::class.java
+        )
+        val repository = entryPoint.transactionRepository()
         val allExpenses = repository.getAllExpensesOnce()
 
         val totalCount = allExpenses.size

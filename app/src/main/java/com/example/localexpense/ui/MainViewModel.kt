@@ -1,24 +1,29 @@
 package com.example.localexpense.ui
 
+import android.app.Application
 import android.content.Context
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.localexpense.data.*
 import android.net.Uri
+import com.example.localexpense.domain.BudgetUseCases
+import com.example.localexpense.domain.CategoryUseCases
+import com.example.localexpense.domain.StatisticsUseCases
+import com.example.localexpense.domain.TransactionUseCases
 import com.example.localexpense.util.Constants
-import com.example.localexpense.util.CoroutineHelper
 import com.example.localexpense.util.DataExporter
 import com.example.localexpense.util.DataImporter
 import com.example.localexpense.util.DateUtils
 import com.example.localexpense.util.FilterManager
 import com.example.localexpense.util.Logger
+import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.*
+import javax.inject.Inject
 
 /**
  * 主界面 ViewModel
@@ -27,19 +32,29 @@ import java.util.*
  * 1. 使用 StateFlow 管理 UI 状态（可观察、可缓存）
  * 2. 使用 Channel 发送一次性事件（Toast、导航等）
  * 3. 使用 UserIntent 处理用户操作（单向数据流）
- * 4. 异常处理统一通过 CoroutineHelper
+ * 4. 异常处理统一通过 UseCase 层封装
  *
  * 性能优化：
  * 1. 使用 stateIn 缓存 Flow，避免重复订阅
  * 2. 使用 flatMapLatest 取消旧的查询
  * 3. 使用 debounce 防抖搜索
  * 4. 使用 distinctUntilChanged 避免重复更新
+ *
+ * 架构优化 (v1.9.4)：
+ * - 使用 UseCase 层替代直接依赖 Repository
+ * - 提高代码可测试性和解耦性
  */
+@HiltViewModel
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
-class MainViewModel(
-    private val repo: TransactionRepository,
-    private val appContext: Context
+class MainViewModel @Inject constructor(
+    private val transactionUseCases: TransactionUseCases,
+    private val statisticsUseCases: StatisticsUseCases,
+    private val categoryUseCases: CategoryUseCases,
+    private val budgetUseCases: BudgetUseCases,
+    application: Application
 ) : ViewModel() {
+
+    private val appContext: Context = application.applicationContext
 
     companion object {
         private const val TAG = "MainViewModel"
@@ -47,13 +62,9 @@ class MainViewModel(
         // Flow 缓存配置（增加超时时间，减少内存抖动）
         private const val FLOW_STOP_TIMEOUT_MS = 10000L
 
-        fun factory(context: Context) = object : ViewModelProvider.Factory {
-            override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                val repo = TransactionRepository.getInstance(context)
-                @Suppress("UNCHECKED_CAST")
-                return MainViewModel(repo, context.applicationContext) as T
-            }
-        }
+        // 数据加载自动重试配置
+        private const val AUTO_RETRY_MAX_ATTEMPTS = 3
+        private const val AUTO_RETRY_DELAY_MS = 2000L
     }
 
     // UI 状态
@@ -76,6 +87,9 @@ class MainViewModel(
 
     // 重试动作
     private var retryAction: (() -> Unit)? = null
+
+    // 自动重试计数器
+    private var autoRetryCount = 0
 
     init {
         Logger.d(TAG) { "ViewModel 初始化" }
@@ -164,16 +178,19 @@ class MainViewModel(
     // ==================== 数据加载 ====================
 
     /**
-     * 加载主要数据
+     * 加载主要数据（带自动重试）
      */
     private fun loadData() {
         viewModelScope.launch {
             try {
-                // 缓存主要数据流
-                val expensesFlow = repo.getAllFlow()
+                // 重置重试计数
+                autoRetryCount = 0
+
+                // 缓存主要数据流（使用 UseCase）
+                val expensesFlow = transactionUseCases.getAllTransactions()
                     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(FLOW_STOP_TIMEOUT_MS), emptyList())
 
-                val categoriesFlow = repo.getAllCategories()
+                val categoriesFlow = categoryUseCases.getAllCategories()
                     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(FLOW_STOP_TIMEOUT_MS), emptyList())
 
                 // 合并数据流
@@ -190,6 +207,8 @@ class MainViewModel(
                         handleLoadError(e)
                     }
                     .collect { data ->
+                        // 数据加载成功，重置重试计数
+                        autoRetryCount = 0
                         updateStateWithData(data)
                     }
             } catch (e: Exception) {
@@ -219,12 +238,34 @@ class MainViewModel(
     }
 
     /**
-     * 处理加载错误
+     * 处理加载错误（支持自动重试）
      */
     private fun handleLoadError(e: Throwable) {
         retryAction = { loadData() }
-        _state.update {
-            it.toError("加载数据失败: ${e.message}", retryAction)
+
+        // 检查是否可以自动重试
+        if (autoRetryCount < AUTO_RETRY_MAX_ATTEMPTS) {
+            autoRetryCount++
+            Logger.w(TAG, "数据加载失败，${AUTO_RETRY_DELAY_MS}ms 后自动重试 ($autoRetryCount/$AUTO_RETRY_MAX_ATTEMPTS)")
+
+            // 显示重试中状态
+            _state.update {
+                it.copy(loadingState = LoadingState.Loading)
+            }
+
+            // 延迟后自动重试
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(AUTO_RETRY_DELAY_MS)
+                if (autoRetryCount <= AUTO_RETRY_MAX_ATTEMPTS) {
+                    loadData()
+                }
+            }
+        } else {
+            // 超过最大重试次数，显示错误
+            Logger.e(TAG, "数据加载失败，已达最大重试次数")
+            _state.update {
+                it.toError("加载数据失败: ${e.message}，请点击重试", retryAction)
+            }
         }
     }
 
@@ -233,15 +274,14 @@ class MainViewModel(
      */
     private fun loadMonthlyStatsFlow(): Flow<Pair<Double, Double>> {
         val (monthStart, monthEnd) = DateUtils.getCurrentMonthRange()
-        // 使用合并查询，减少数据库访问次数
-        return repo.getTotalExpenseAndIncome(monthStart, monthEnd).map { stat ->
+        // 使用 UseCase 合并查询，减少数据库访问次数
+        return statisticsUseCases.getStatsForRange(monthStart, monthEnd).map { stat ->
             Pair(stat.totalExpense, stat.totalIncome)
         }
     }
 
     private fun loadBudgetFlow(): Flow<BudgetEntity?> {
-        val currentMonth = DateUtils.getCurrentMonthId()
-        return repo.getTotalBudget(currentMonth)
+        return budgetUseCases.getCurrentMonthBudget()
     }
 
     // ==================== 搜索 ====================
@@ -263,7 +303,7 @@ class MainViewModel(
                     if (query.isBlank()) {
                         flowOf(emptyList())
                     } else {
-                        repo.search(query)
+                        transactionUseCases.searchTransactions(query)
                     }
                 }
                 .catch { e ->
@@ -331,10 +371,10 @@ class MainViewModel(
             }
                 .flatMapLatest { params ->
                     combine(
-                        repo.getCategoryStats("expense", params.start, params.end),
-                        repo.getDailyStats("expense", params.start, params.end),
-                        repo.getCategoryStats("income", params.start, params.end),
-                        repo.getDailyStats("income", params.start, params.end)
+                        statisticsUseCases.getCategoryStats("expense", params.start, params.end),
+                        statisticsUseCases.getDailyStats("expense", params.start, params.end),
+                        statisticsUseCases.getCategoryStats("income", params.start, params.end),
+                        statisticsUseCases.getDailyStats("income", params.start, params.end)
                     ) { expenseCat, expenseDaily, incomeCat, incomeDaily ->
                         StatsBundle(params, expenseCat, expenseDaily, incomeCat, incomeDaily)
                     }
@@ -376,14 +416,7 @@ class MainViewModel(
         viewModelScope.launch {
             _state.update { it.startOperation(OperationState.Saving) }
 
-            val result = CoroutineHelper.runSafely {
-                if (expense.id == 0L) {
-                    repo.insertExpense(expense)
-                } else {
-                    repo.updateExpense(expense)
-                    expense.id
-                }
-            }
+            val result = transactionUseCases.addTransaction(expense)
 
             result.fold(
                 onSuccess = { id ->
@@ -409,18 +442,18 @@ class MainViewModel(
         viewModelScope.launch {
             _state.update { it.startOperation(OperationState.Deleting) }
 
-            val result = CoroutineHelper.runSafely {
-                repo.deleteExpense(expense)
-            }
+            val result = transactionUseCases.deleteTransaction(expense)
 
             result.fold(
                 onSuccess = {
                     Logger.d(TAG) { "交易删除成功: id=${expense.id}" }
                     _state.update { it.endOperation() }
+                    // 优化：使用较长的 Snackbar 持续时间，让用户有足够时间点击撤销
                     sendEvent(UiEvent.ShowSnackbar(
                         message = "已删除",
                         actionLabel = "撤销",
-                        action = { addExpense(expense.copy(id = 0)) }
+                        action = { addExpense(expense.copy(id = 0)) },
+                        duration = SnackbarDurationType.LONG
                     ))
                     refreshStats()
                 },
@@ -446,18 +479,13 @@ class MainViewModel(
     // ==================== 预算 ====================
 
     private fun saveBudget(amount: Double) {
-        val currentMonth = DateUtils.getCurrentMonthId()
         viewModelScope.launch {
             _state.update { it.startOperation(OperationState.Saving) }
 
-            val result = CoroutineHelper.runSafely {
-                val budget = BudgetEntity.create(
-                    id = _state.value.budget?.id ?: 0,
-                    amount = amount,
-                    month = currentMonth
-                )
-                repo.insertBudget(budget)
-            }
+            val result = budgetUseCases.saveCurrentMonthBudget(
+                amount = amount,
+                existingBudgetId = _state.value.budget?.id
+            )
 
             result.fold(
                 onSuccess = {
@@ -477,9 +505,7 @@ class MainViewModel(
 
     private fun addCategory(category: CategoryEntity) {
         viewModelScope.launch {
-            val result = CoroutineHelper.runSafely {
-                repo.insertCategory(category)
-            }
+            val result = categoryUseCases.addCategory(category)
 
             result.fold(
                 onSuccess = {
@@ -495,9 +521,7 @@ class MainViewModel(
 
     private fun deleteCategory(category: CategoryEntity) {
         viewModelScope.launch {
-            val result = CoroutineHelper.runSafely {
-                repo.deleteCategory(category)
-            }
+            val result = categoryUseCases.deleteCategory(category)
 
             result.fold(
                 onSuccess = {
@@ -637,24 +661,16 @@ class MainViewModel(
                             Logger.w(TAG, "导入数据警告: ${validation.warnings}")
                         }
 
-                        // 批量插入
-                        var insertedCount = 0
-                        for (transaction in result.transactions) {
-                            try {
-                                repo.insertExpense(transaction)
-                                insertedCount++
-                            } catch (e: Exception) {
-                                Logger.w(TAG, "插入交易失败: ${e.message}")
-                            }
-                        }
+                        // 使用 UseCase 批量插入
+                        val batchResult = transactionUseCases.addTransactions(result.transactions)
 
                         _state.update { it.endOperation() }
                         refreshStats()
 
                         sendEvent(UiEvent.ImportSuccess(
-                            importedCount = insertedCount,
+                            importedCount = batchResult.successCount,
                             skippedCount = result.skippedCount,
-                            failedCount = result.failedCount + (result.transactions.size - insertedCount)
+                            failedCount = result.failedCount + batchResult.failCount
                         ))
                     }
                     is DataImporter.ImportResult.Failure -> {
@@ -681,16 +697,19 @@ class MainViewModel(
                 viewModelScope.launch {
                     _state.update { it.startOperation(OperationState.Deleting) }
 
-                    try {
-                        repo.deleteAllExpenses()
-                        _state.update { it.endOperation() }
-                        refreshStats()
-                        sendEvent(UiEvent.ShowToast("所有数据已清除"))
-                    } catch (e: Exception) {
-                        Logger.e(TAG, "清除数据失败", e)
-                        _state.update { it.operationError("清除失败: ${e.message}") }
-                        sendEvent(UiEvent.ShowToast("清除失败", isError = true))
-                    }
+                    val result = transactionUseCases.deleteAllTransactions()
+                    result.fold(
+                        onSuccess = {
+                            _state.update { it.endOperation() }
+                            refreshStats()
+                            sendEvent(UiEvent.ShowToast("所有数据已清除"))
+                        },
+                        onFailure = { e ->
+                            Logger.e(TAG, "清除数据失败", e)
+                            _state.update { it.operationError("清除失败: ${e.message}") }
+                            sendEvent(UiEvent.ShowToast("清除失败", isError = true))
+                        }
+                    )
                 }
             }
         ))
@@ -806,6 +825,7 @@ class MainViewModel(
 
     /**
      * 删除选中的交易（使用事务保护的批量删除）
+     * 优化：添加确认对话框和撤销功能
      */
     private fun deleteSelected() {
         val selectedIdList = _selectedIds.value.toList()
@@ -814,28 +834,89 @@ class MainViewModel(
             return
         }
 
+        // 保存要删除的交易记录，用于撤销
+        val transactionsToDelete = _state.value.expenses.filter { it.id in selectedIdList }
+        val count = transactionsToDelete.size
+
+        // 显示确认对话框
+        sendEvent(UiEvent.ConfirmAction(
+            title = "确认删除",
+            message = "确定要删除选中的 $count 条记录吗？",
+            onConfirm = {
+                performBatchDelete(selectedIdList, transactionsToDelete)
+            }
+        ))
+    }
+
+    /**
+     * 执行批量删除操作
+     */
+    private fun performBatchDelete(ids: List<Long>, transactionsBackup: List<ExpenseEntity>) {
         viewModelScope.launch {
             _state.update { it.startOperation(OperationState.Deleting) }
 
             try {
-                // 使用事务保护的批量删除
-                val result = repo.deleteExpensesBatch(selectedIdList)
+                // 使用 UseCase 事务保护的批量删除
+                val result = transactionUseCases.deleteTransactions(ids)
 
                 _state.update { it.endOperation() }
                 exitSelectionMode()
                 refreshStats()
 
-                val message = if (result.hasErrors) {
-                    "删除失败: ${result.errors.firstOrNull() ?: "未知错误"}"
+                if (result.hasErrors) {
+                    sendEvent(UiEvent.ShowToast(
+                        "删除失败: ${result.errors.firstOrNull() ?: "未知错误"}",
+                        isError = true
+                    ))
                 } else {
-                    "已删除 ${result.successCount} 条记录"
+                    // 显示带撤销功能的 Snackbar（使用较长持续时间）
+                    sendEvent(UiEvent.ShowSnackbar(
+                        message = "已删除 ${result.successCount} 条记录",
+                        actionLabel = "撤销",
+                        action = {
+                            // 恢复被删除的记录
+                            restoreDeletedTransactions(transactionsBackup)
+                        },
+                        duration = SnackbarDurationType.LONG
+                    ))
                 }
-                sendEvent(UiEvent.ShowToast(message, isError = result.hasErrors))
 
             } catch (e: Exception) {
                 Logger.e(TAG, "批量删除失败", e)
                 _state.update { it.operationError("批量删除失败: ${e.message}") }
                 sendEvent(UiEvent.ShowToast("批量删除失败", isError = true))
+            }
+        }
+    }
+
+    /**
+     * 恢复被删除的交易记录（撤销操作）
+     */
+    private fun restoreDeletedTransactions(transactions: List<ExpenseEntity>) {
+        viewModelScope.launch {
+            // 使用恢复中状态
+            _state.update { it.startOperation(OperationState.Restoring) }
+
+            try {
+                // 使用 UseCase 批量插入恢复记录（使用 copy(id=0) 创建新记录）
+                val restoredEntities = transactions.map { it.copy(id = 0) }
+                val result = transactionUseCases.addTransactions(restoredEntities)
+
+                _state.update { it.endOperation() }
+
+                if (result.hasErrors) {
+                    sendEvent(UiEvent.ShowToast(
+                        "部分恢复失败: 成功 ${result.successCount} 条，失败 ${result.failCount} 条",
+                        isError = true
+                    ))
+                } else {
+                    sendEvent(UiEvent.ShowToast("已恢复 ${result.successCount} 条记录"))
+                }
+                refreshStats()
+            } catch (e: Exception) {
+                Logger.e(TAG, "恢复记录失败", e)
+                _state.update { it.endOperation() }
+                sendEvent(UiEvent.ShowToast("恢复失败: ${e.message}", isError = true))
             }
         }
     }

@@ -11,7 +11,7 @@ import com.example.localexpense.util.Logger
 
 @Database(
     entities = [ExpenseEntity::class, CategoryEntity::class, BudgetEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false  // 禁用 schema 导出，避免构建警告
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -81,6 +81,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * 数据库迁移：版本 4 -> 5 (v1.9.6)
+         * 添加渠道索引和金额+类型复合索引
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                Logger.i(TAG, "执行数据库迁移 4 -> 5")
+                try {
+                    // 添加渠道索引，优化按渠道筛选查询
+                    db.execSQL("CREATE INDEX IF NOT EXISTS idx_channel ON expense(channel)")
+                    // 添加金额+类型复合索引，优化大额交易筛选
+                    db.execSQL("CREATE INDEX IF NOT EXISTS idx_amount_type ON expense(amount, type)")
+                    Logger.i(TAG, "数据库迁移 4 -> 5 完成")
+                } catch (e: Exception) {
+                    Logger.w(TAG, "迁移索引创建失败: ${e.message}")
+                }
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: buildDatabase(context).also { INSTANCE = it }
@@ -93,7 +112,7 @@ abstract class AppDatabase : RoomDatabase() {
                 AppDatabase::class.java,
                 Constants.DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 // 启用 WAL 模式，提升写入性能
                 // WAL 模式允许读写并发，减少锁等待

@@ -32,12 +32,13 @@ import androidx.core.content.FileProvider
 import com.example.localexpense.data.BudgetEntity
 import com.example.localexpense.data.CategoryEntity
 import com.example.localexpense.data.ExpenseEntity
-import com.example.localexpense.data.TransactionRepository
 import com.example.localexpense.data.backup.DataBackupManager
+import com.example.localexpense.di.RepositoryEntryPoint
 import com.example.localexpense.domain.Result
 import com.example.localexpense.ui.theme.ExpenseTheme
 import com.example.localexpense.ui.util.IconUtil
 import com.example.localexpense.util.MonitorSettings
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -66,9 +67,13 @@ fun SettingsScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // 备份管理器
+    // 通过 EntryPoint 获取 Repository（Hilt 管理的单例）
     val backupManager = remember {
-        DataBackupManager(context, TransactionRepository.getInstance(context))
+        val entryPoint = EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            RepositoryEntryPoint::class.java
+        )
+        DataBackupManager(context, entryPoint.transactionRepository())
     }
 
     // 使用可复用的 Hook 检测无障碍服务状态
@@ -1073,7 +1078,14 @@ private fun CleanupDialog(
     scope: kotlinx.coroutines.CoroutineScope,
     onDismiss: () -> Unit
 ) {
-    val repository = remember { TransactionRepository.getInstance(context) }
+    // 通过 EntryPoint 获取 Repository（Hilt 管理的单例）
+    val repository = remember {
+        val entryPoint = EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            RepositoryEntryPoint::class.java
+        )
+        entryPoint.transactionRepository()
+    }
     var selectedPeriod by remember { mutableStateOf(3) } // 默认3个月
     var isLoading by remember { mutableStateOf(false) }
     var countToDelete by remember { mutableStateOf<Int?>(null) }

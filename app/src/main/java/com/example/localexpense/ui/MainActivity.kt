@@ -6,21 +6,23 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.localexpense.ui.theme.LocalExpenseTheme
+import dagger.hilt.android.AndroidEntryPoint
 
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         setContent {
-            val vm: MainViewModel = viewModel(
-                factory = MainViewModel.factory(applicationContext)
-            )
-            val state by vm.state.collectAsState()
+            val vm: MainViewModel = hiltViewModel()
+            // v1.9.5 优化：使用 collectAsStateWithLifecycle 替代 collectAsState
+            // 在 Activity 进入后台时自动停止收集，节省系统资源
+            val state by vm.state.collectAsStateWithLifecycle()
 
             LocalExpenseTheme {
                 MainScreen(

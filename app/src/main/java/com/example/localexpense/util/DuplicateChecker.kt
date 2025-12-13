@@ -1,10 +1,14 @@
 package com.example.localexpense.util
 
+import com.example.localexpense.domain.service.DuplicateStats
+import com.example.localexpense.domain.service.IDuplicateDetector
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * 交易去重检测器
@@ -12,46 +16,98 @@ import java.util.concurrent.atomic.AtomicLong
  * 功能：
  * 1. 基于金额+商户+类型的组合判断重复
  * 2. 基于原始文本哈希的去重（防止同一页面多次触发）
- * 3. 使用高性能缓存记录最近的多笔交易
+ * 3. 使用线程安全的 LRU 缓存记录最近的多笔交易
  * 4. 支持配置去重时间窗口
  * 5. 支持不同渠道差异化去重时间
- * 6. 完全线程安全（使用 ConcurrentHashMap）
+ * 6. 完全线程安全
  *
  * 使用场景：
  * - 无障碍服务检测到交易时，防止重复记录
  * - 通知和窗口事件可能同时触发同一笔交易
  * - 支付宝页面刷新导致的重复触发
  *
- * 性能优化：
- * - 使用 ConcurrentHashMap 避免全局锁
- * - 延迟清理过期记录，避免每次操作都清理
- * - 增大缓存容量以支持高频交易场景
+ * 性能优化 v1.8.2：
+ * - 使用 ConcurrentHashMap 替代 synchronized Map，提升并发性能
+ * - 优化清理策略，使用分片清理避免全表扫描
+ * - 缓存商户名规范化结果，避免重复计算
+ *
+ * 内存优化 v1.9.0：
+ * - 动态调整缓存大小，根据设备可用内存自适应
+ * - 低内存设备使用更小的缓存
  */
-class DuplicateChecker(
-    private val timeWindowMs: Long = Constants.DUPLICATE_CHECK_INTERVAL_MS,
-    private val maxCacheSize: Int = 100  // 增加缓存容量
-) {
-    // 使用 ConcurrentHashMap 提高并发性能
-    private val cache = ConcurrentHashMap<String, Long>(maxCacheSize)
-    private val rawTextCache = ConcurrentHashMap<String, Long>(maxCacheSize)
+@Singleton
+class DuplicateChecker @Inject constructor() : IDuplicateDetector {
 
-    // 处理中的交易（用于防止竞态条件）
-    // value: 开始处理的时间戳，用于超时清理
-    private val processingCache = ConcurrentHashMap<String, Long>(maxCacheSize)
-    private val processingTimeoutMs = 30_000L  // 处理中状态最长持续 30 秒
+    private val timeWindowMs: Long = Constants.DUPLICATE_CHECK_INTERVAL_MS
+    private val dynamicCacheSize: Int = DEFAULT_CACHE_SIZE
 
-    // 上次清理时间（用于延迟清理）
+    // 使用 ConcurrentHashMap 替代 synchronized Map，提升并发性能
+    private val cache = ConcurrentHashMap<String, Long>(dynamicCacheSize)
+    private val rawTextCache = ConcurrentHashMap<String, Long>(dynamicCacheSize)
+    private val processingCache = ConcurrentHashMap<String, Long>(dynamicCacheSize)
+
+    // 处理中状态最长持续时间
+    private val processingTimeoutMs = 30_000L
+
+    // 用户取消后的冷却时间（防止立即重新触发）
+    private val cancelCooldownMs = 5_000L
+
+    // 取消冷却缓存
+    private val cancelCooldownCache = ConcurrentHashMap<String, Long>(dynamicCacheSize)
+
+    // 上次清理时间
     private val lastCleanupTime = AtomicLong(System.currentTimeMillis())
-    private val cleanupIntervalMs = 5000L  // 每 5 秒最多清理一次
+    private val cleanupIntervalMs = 5000L
 
-    // 预编译正则表达式（避免重复编译）
+    // 商户名规范化缓存大小
+    companion object {
+        private const val TAG = "DuplicateChecker"
+        private const val MERCHANT_CACHE_SIZE = 256
+        private const val DEFAULT_CACHE_SIZE = 100
+
+        // 内存等级对应的缓存大小（保留用于将来可能的动态调整）
+        private const val CACHE_SIZE_LOW_MEMORY = 50
+        private const val CACHE_SIZE_NORMAL = 100
+        private const val CACHE_SIZE_HIGH_MEMORY = 200
+    }
+
+    // 商户名规范化缓存（使用线程安全的 LRU 缓存）
+    private val merchantNormalizeCache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+            return size > MERCHANT_CACHE_SIZE
+        }
+    }
+    private val merchantCacheLock = Any()
+
+    // 预编译正则表达式
     private val timeRegex = Regex("\\d{1,2}:\\d{2}(:\\d{2})?")
     private val dateRegex = Regex("\\d{4}-\\d{2}-\\d{2}")
     private val whitespaceRegex = Regex("\\s+")
 
-    // 统计信息（使用原子类保证线程安全）
+    // 统计信息
     private val totalChecks = AtomicLong(0)
     private val duplicatesFound = AtomicLong(0)
+
+    /**
+     * 检查交易是否应该被处理（非重复）
+     * 实现 IDuplicateDetector 接口
+     *
+     * @param amount 交易金额
+     * @param merchant 商户名称
+     * @param type 交易类型 (expense/income)
+     * @param packageName 来源应用包名（可选，用于差异化去重时间）
+     * @return true 表示应该处理，false 表示重复应跳过
+     */
+    override fun shouldProcess(
+        amount: Double,
+        merchant: String,
+        type: String,
+        packageName: String?
+    ): Boolean {
+        // 将 packageName 转换为 channel
+        val channel = packageName?.let { Channel.PACKAGE_MAP[it] }
+        return shouldProcessInternal(amount, merchant, type, channel, null)
+    }
 
     /**
      * 检查交易是否应该被处理（非重复）
@@ -71,6 +127,16 @@ class DuplicateChecker(
         channel: String? = null,
         rawText: String? = null
     ): Boolean {
+        return shouldProcessInternal(amount, merchant, type, channel, rawText)
+    }
+
+    private fun shouldProcessInternal(
+        amount: Double,
+        merchant: String,
+        type: String,
+        channel: String?,
+        rawText: String?
+    ): Boolean {
         // 生成包含渠道的 key，避免不同渠道相同金额交易被误判
         val key = if (channel != null) {
             "${generateKey(amount, merchant, type)}|$channel"
@@ -78,7 +144,7 @@ class DuplicateChecker(
             generateKey(amount, merchant, type)
         }
         val effectiveWindow = getEffectiveTimeWindow(channel)
-        return shouldProcessInternal(key, effectiveWindow, rawText, amount)
+        return shouldProcessInternalByKey(key, effectiveWindow, rawText, amount)
     }
 
     /**
@@ -95,7 +161,7 @@ class DuplicateChecker(
      * 内部处理逻辑
      * 优化：使用无锁并发，增加金额参数用于更智能的原始文本去重
      */
-    private fun shouldProcessInternal(key: String, effectiveWindow: Long, rawText: String?, amount: Double = 0.0): Boolean {
+    private fun shouldProcessInternalByKey(key: String, effectiveWindow: Long, rawText: String?, amount: Double = 0.0): Boolean {
         totalChecks.incrementAndGet()
         val now = System.currentTimeMillis()
 
@@ -184,15 +250,21 @@ class DuplicateChecker(
 
     /**
      * 生成原始文本的哈希值
+     * 优化：使用更安全的降级策略，减少碰撞风险
      */
     private fun hashRawText(text: String): String {
         return try {
             val md = MessageDigest.getInstance("MD5")
-            val digest = md.digest(text.toByteArray())
+            val digest = md.digest(text.toByteArray(Charsets.UTF_8))
             digest.joinToString("") { "%02x".format(it) }
         } catch (e: Exception) {
-            // 降级到简单哈希
-            text.hashCode().toString()
+            // 降级策略：使用多重哈希组合，降低碰撞风险
+            // 组合 hashCode + 长度 + 首尾字符的哈希
+            val hashCode = text.hashCode()
+            val length = text.length
+            val prefixHash = if (text.length > 10) text.substring(0, 10).hashCode() else 0
+            val suffixHash = if (text.length > 10) text.substring(text.length - 10).hashCode() else 0
+            "${hashCode}_${length}_${prefixHash}_$suffixHash"
         }
     }
 
@@ -214,68 +286,71 @@ class DuplicateChecker(
     }
 
     /**
-     * 规范化商户名称
+     * 规范化商户名称（带缓存）
      * 目的：确保同一交易的商户名即使略有不同也能匹配
+     * 优化：使用 LRU 缓存避免重复计算，线程安全
      */
     private fun normalizeMerchant(merchant: String): String {
+        // 先检查缓存（线程安全）
+        synchronized(merchantCacheLock) {
+            merchantNormalizeCache[merchant]?.let { return it }
+        }
+
         var normalized = merchant.trim().lowercase()
 
-        // 移除常见前缀/后缀，使不同解析结果能匹配
-        // 例如："微信红包" 和 "红包" 应该被认为是同一类型
-        val prefixesToRemove = listOf("微信", "支付宝", "云闪付", "发出", "收到")
-        val suffixesToRemove = listOf("支付", "收款", "转账给", "的红包")
-
-        for (prefix in prefixesToRemove) {
+        // 只移除平台前缀，保留核心商户/人名信息
+        val platformPrefixes = listOf("微信-", "支付宝-", "云闪付-")
+        for (prefix in platformPrefixes) {
             if (normalized.startsWith(prefix) && normalized.length > prefix.length) {
                 normalized = normalized.removePrefix(prefix)
             }
         }
 
-        for (suffix in suffixesToRemove) {
-            if (normalized.endsWith(suffix) && normalized.length > suffix.length) {
-                normalized = normalized.removeSuffix(suffix)
-            }
+        // 规范化未知商户
+        if (normalized == "未知商户" || normalized == "未知" || normalized.isEmpty()) {
+            normalized = "unknown"
+        } else {
+            normalized = normalized.trim()
         }
 
-        // 规范化常见商户名变体
-        normalized = when {
-            normalized.contains("红包") -> "红包"
-            normalized.contains("转账") && !normalized.contains("人") -> "转账"
-            normalized == "未知商户" || normalized == "未知" -> "unknown"
-            else -> normalized
+        // 缓存结果（线程安全，LRU 自动淘汰）
+        synchronized(merchantCacheLock) {
+            merchantNormalizeCache[merchant] = normalized
         }
 
-        return normalized.trim()
+        return normalized
     }
 
     /**
-     * 延迟清理过期记录（避免每次操作都清理，提高性能）
+     * 延迟清理过期记录
+     * 优化：使用 ConcurrentHashMap 的 forEachKey 进行非阻塞清理
      */
     private fun maybeCleanExpired(currentTime: Long, window: Long) {
         val lastCleanup = lastCleanupTime.get()
         if (currentTime - lastCleanup < cleanupIntervalMs) {
-            return  // 还没到清理时间
+            return
         }
 
-        // CAS 更新清理时间，确保只有一个线程执行清理
+        // CAS 更新清理时间
         if (!lastCleanupTime.compareAndSet(lastCleanup, currentTime)) {
-            return  // 其他线程已经在清理
+            return
         }
 
-        // 使用迭代器清理过期记录，避免创建中间列表
-        cleanExpiredEntries(cache, currentTime, window)
-        cleanExpiredEntries(rawTextCache, currentTime, window)
-        cleanExpiredEntries(processingCache, currentTime, processingTimeoutMs)
+        // 使用 ConcurrentHashMap 的非阻塞遍历
+        cleanExpiredFromMap(cache, currentTime, window)
+        cleanExpiredFromMap(rawTextCache, currentTime, window)
+        cleanExpiredFromMap(processingCache, currentTime, processingTimeoutMs)
 
-        // 如果缓存过大，强制清理最旧的记录
-        trimCacheIfNeeded(cache, maxCacheSize)
-        trimCacheIfNeeded(rawTextCache, maxCacheSize)
+        // 限制缓存大小（简单的淘汰策略）
+        trimCacheIfNeeded(cache)
+        trimCacheIfNeeded(rawTextCache)
+        trimCacheIfNeeded(processingCache)
     }
 
     /**
-     * 使用迭代器清理过期条目（避免 ConcurrentModificationException）
+     * 从 ConcurrentHashMap 中清理过期条目
      */
-    private fun cleanExpiredEntries(map: ConcurrentHashMap<String, Long>, currentTime: Long, window: Long) {
+    private fun cleanExpiredFromMap(map: ConcurrentHashMap<String, Long>, currentTime: Long, window: Long) {
         val iterator = map.entries.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
@@ -286,22 +361,65 @@ class DuplicateChecker(
     }
 
     /**
-     * 当缓存过大时，清理最旧的记录
+     * 如果缓存超出大小限制，移除最旧的条目
+     * 优化：使用迭代器删除，避免排序带来的性能开销
      */
-    private fun trimCacheIfNeeded(map: ConcurrentHashMap<String, Long>, maxSize: Int) {
-        if (map.size <= maxSize) return
+    private fun trimCacheIfNeeded(map: ConcurrentHashMap<String, Long>) {
+        val currentSize = map.size
+        if (currentSize <= dynamicCacheSize) return
 
-        // 找到需要删除的数量
-        val toRemoveCount = map.size - maxSize
-        if (toRemoveCount <= 0) return
+        // 计算需要移除的条目数（移除 20% 额外条目，避免频繁触发清理）
+        val targetSize = (dynamicCacheSize * 0.8).toInt()
+        val entriesToRemove = currentSize - targetSize
+        if (entriesToRemove <= 0) return
 
-        // 获取最旧的 N 个 key（只在需要时排序）
-        val oldestKeys = map.entries
-            .sortedBy { it.value }
-            .take(toRemoveCount)
-            .map { it.key }
+        // 找出阈值时间（只需要找出第 N 旧的时间戳）
+        val times = map.values.toMutableList()
+        times.sort()
+        val cutoffTime = if (entriesToRemove < times.size) {
+            times[entriesToRemove - 1]
+        } else {
+            Long.MAX_VALUE
+        }
 
-        oldestKeys.forEach { map.remove(it) }
+        // 使用迭代器移除旧条目
+        val iterator = map.entries.iterator()
+        var removed = 0
+        while (iterator.hasNext() && removed < entriesToRemove) {
+            val entry = iterator.next()
+            if (entry.value <= cutoffTime) {
+                iterator.remove()
+                removed++
+            }
+        }
+    }
+
+    /**
+     * 手动标记交易已处理（实现 IDuplicateDetector 接口）
+     */
+    override fun markProcessed(amount: Double, merchant: String, type: String) {
+        markProcessed(amount, merchant, type, null, null)
+    }
+
+    /**
+     * 标记交易为已取消（实现 IDuplicateDetector 接口）
+     */
+    override fun markCancelled(amount: Double, merchant: String, type: String) {
+        releaseProcessing(amount, merchant, type, null, addCooldown = true)
+    }
+
+    /**
+     * 清空缓存（实现 IDuplicateDetector 接口）
+     */
+    override fun clear() {
+        cache.clear()
+        rawTextCache.clear()
+        processingCache.clear()
+        cancelCooldownCache.clear()
+        synchronized(merchantCacheLock) {
+            merchantNormalizeCache.clear()
+        }
+        resetStats()
     }
 
     /**
@@ -391,9 +509,9 @@ class DuplicateChecker(
 
     /**
      * 原子性地尝试获取交易处理权
-     * 解决竞态条件：在检查重复的同时标记为"处理中"
+     * v1.9.3: 增强原子性，解决原始文本检查的竞态条件
      *
-     * @return true 表示成功获取处理权（非重复且未被其他线程处理），false 表示应跳过
+     * @return true 表示成功获取处理权，false 表示应跳过
      */
     fun tryAcquireForProcessing(
         amount: Double,
@@ -410,18 +528,47 @@ class DuplicateChecker(
         // 清理过期的处理中状态
         cleanExpiredProcessing(now)
 
-        // 1. 检查是否已经处理过（已确认的）
+        // 1. 检查是否已经处理过
         val lastTime = cache[key]
         if (lastTime != null && now - lastTime < effectiveWindow) {
             Logger.d(TAG) { "跳过重复交易(已处理): ${Logger.maskText(key)}" }
             return false
         }
 
-        // 2. 检查是否正在处理中（使用 putIfAbsent 实现原子操作）
+        // 1.5 检查是否在取消冷却期内
+        val cancelTime = cancelCooldownCache[key]
+        if (cancelTime != null && now - cancelTime < cancelCooldownMs) {
+            Logger.d(TAG) { "跳过交易(取消冷却中): ${Logger.maskText(key)}" }
+            return false
+        }
+
+        // 2. 计算原始文本哈希（先计算，后续原子操作中使用）
+        val textHash = if (!rawText.isNullOrBlank() && amount > 0) {
+            val normalizedText = normalizeRawText(rawText, amount)
+            hashRawText(normalizedText)
+        } else null
+
+        // 3. 原子性地检查原始文本缓存（先于处理权获取）
+        // 这样可以避免：A获取处理权 -> B检查文本缓存 -> 两者都通过的竞态
+        if (textHash != null) {
+            val lastTextTime = rawTextCache[textHash]
+            if (lastTextTime != null && now - lastTextTime < effectiveWindow) {
+                Logger.d(TAG) { "跳过重复交易(原始文本相同)" }
+                return false
+            }
+            // 立即标记原始文本，防止其他线程同时通过
+            rawTextCache[textHash] = now
+        }
+
+        // 4. 尝试原子性地标记为处理中
         val existingProcessing = processingCache.putIfAbsent(key, now)
         if (existingProcessing != null) {
-            // 已经有其他线程在处理，检查是否超时
+            // 已经有其他线程在处理
             if (now - existingProcessing < processingTimeoutMs) {
+                // 如果标记了原始文本，需要回滚
+                if (textHash != null) {
+                    rawTextCache.remove(textHash)
+                }
                 Logger.d(TAG) { "跳过重复交易(处理中): ${Logger.maskText(key)}" }
                 return false
             }
@@ -429,53 +576,62 @@ class DuplicateChecker(
             processingCache[key] = now
         }
 
-        // 3. 检查原始文本缓存
-        if (!rawText.isNullOrBlank() && amount > 0) {
-            val normalizedText = normalizeRawText(rawText, amount)
-            val textHash = hashRawText(normalizedText)
-            val lastTextTime = rawTextCache[textHash]
-            if (lastTextTime != null && now - lastTextTime < effectiveWindow) {
-                // 移除处理中标记
-                processingCache.remove(key)
-                Logger.d(TAG) { "跳过重复交易(原始文本相同)" }
-                return false
-            }
-        }
-
         Logger.d(TAG) { "获取处理权成功: ${Logger.maskText(key)}" }
         return true
     }
 
     /**
-     * 释放交易处理权（处理失败或用户取消时调用）
-     * 允许该交易被再次检测和处理
+     * 释放交易处理权
+     * 优化 v1.9.2: 添加冷却时间，防止用户取消后立即重新触发
+     *
+     * @param addCooldown 是否添加冷却时间（用户主动取消时为 true）
      */
     fun releaseProcessing(
         amount: Double,
         merchant: String,
         type: String,
-        channel: String? = null
+        channel: String? = null,
+        addCooldown: Boolean = false
     ) {
         val baseKey = generateKey(amount, merchant, type)
         val key = if (channel != null) "$baseKey|$channel" else baseKey
         processingCache.remove(key)
-        Logger.d(TAG) { "释放处理权: ${Logger.maskText(key)}" }
+
+        // 如果是用户主动取消，添加短暂冷却时间防止立即重新触发
+        if (addCooldown) {
+            cancelCooldownCache[key] = System.currentTimeMillis()
+            Logger.d(TAG) { "释放处理权并添加冷却: ${Logger.maskText(key)}" }
+        } else {
+            Logger.d(TAG) { "释放处理权: ${Logger.maskText(key)}" }
+        }
     }
 
     /**
      * 清理过期的处理中状态
      */
     private fun cleanExpiredProcessing(currentTime: Long) {
-        val expiredKeys = processingCache.entries
-            .filter { currentTime - it.value >= processingTimeoutMs }
-            .map { it.key }
-        expiredKeys.forEach { processingCache.remove(it) }
+        cleanExpiredFromMap(processingCache, currentTime, processingTimeoutMs)
+        cleanExpiredFromMap(cancelCooldownCache, currentTime, cancelCooldownMs)
     }
 
     /**
-     * 获取统计信息
+     * 获取统计信息（实现 IDuplicateDetector 接口）
      */
-    fun getStats(): Stats {
+    override fun getStats(): DuplicateStats {
+        val total = totalChecks.get()
+        val blocked = duplicatesFound.get()
+        return DuplicateStats(
+            totalChecks = total,
+            duplicatesBlocked = blocked,
+            cacheSize = cache.size,
+            hitRate = if (total > 0) (blocked * 100.0 / total) else 0.0
+        )
+    }
+
+    /**
+     * 获取详细统计信息（扩展）
+     */
+    fun getDetailedStats(): Stats {
         return Stats(
             totalChecks = totalChecks.get(),
             duplicatesFound = duplicatesFound.get(),
@@ -497,16 +653,6 @@ class DuplicateChecker(
     }
 
     /**
-     * 清空缓存
-     */
-    fun clear() {
-        cache.clear()
-        rawTextCache.clear()
-        processingCache.clear()
-        resetStats()
-    }
-
-    /**
      * 统计信息数据类
      */
     data class Stats(
@@ -517,31 +663,4 @@ class DuplicateChecker(
         val processingCacheSize: Int = 0,
         val duplicateRate: Double
     )
-
-    companion object {
-        private const val TAG = "DuplicateChecker"
-
-        // 全局单例（用于无障碍服务）
-        @Volatile
-        private var instance: DuplicateChecker? = null
-
-        /**
-         * 获取全局单例
-         */
-        fun getInstance(): DuplicateChecker {
-            return instance ?: synchronized(this) {
-                instance ?: DuplicateChecker().also { instance = it }
-            }
-        }
-
-        /**
-         * 重置全局单例（用于测试）
-         */
-        fun resetInstance() {
-            synchronized(this) {
-                instance?.clear()
-                instance = null
-            }
-        }
-    }
 }

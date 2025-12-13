@@ -5,10 +5,13 @@ import android.os.Build
 import android.os.StrictMode
 import android.util.Log
 import com.example.localexpense.data.TransactionRepository
+import com.example.localexpense.di.RepositoryEntryPoint
 import com.example.localexpense.util.CryptoUtils
 import com.example.localexpense.util.DatabaseOptimizer
 import com.example.localexpense.util.Logger
 import com.example.localexpense.util.PerformanceMonitor
+import dagger.hilt.EntryPoints
+import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,6 +25,7 @@ import kotlinx.coroutines.launch
  * 2. 非关键初始化延迟到后台线程
  * 3. 使用 PerformanceMonitor 追踪启动时间
  */
+@HiltAndroidApp
 class LocalExpenseApp : Application() {
 
     companion object {
@@ -100,9 +104,13 @@ class LocalExpenseApp : Application() {
             val startTime = PerformanceMonitor.startTimer("后台初始化")
 
             try {
+                // 通过 EntryPoint 获取 Repository（Hilt 管理的单例）
+                val entryPoint = EntryPoints.get(this@LocalExpenseApp, RepositoryEntryPoint::class.java)
+                val repository = entryPoint.transactionRepository()
+
                 // 预热 Repository（触发数据库初始化）
                 // 这会在后台创建数据库连接和默认分类
-                TransactionRepository.getInstance(applicationContext).waitForInitialization()
+                repository.waitForInitialization()
 
                 // 预热 SecurePreferences（触发 MasterKey 创建）
                 // 首次访问可能需要生成密钥，耗时较长
@@ -139,12 +147,54 @@ class LocalExpenseApp : Application() {
 
     override fun onTerminate() {
         super.onTerminate()
-        // 清理 Repository 的协程作用域，防止资源泄漏
+        // 清理资源，防止资源泄漏
+        cleanupResources()
+    }
+
+    /**
+     * 清理所有需要手动释放的资源
+     * 在 onTerminate 和应用退出时调用
+     * 优化 v1.8.3：添加更多资源清理，确保无泄漏
+     */
+    private fun cleanupResources() {
         try {
-            TransactionRepository.getInstance(this).shutdown()
+            // 通过 EntryPoint 获取 Repository（Hilt 管理的单例）
+            val entryPoint = EntryPoints.get(this, RepositoryEntryPoint::class.java)
+            entryPoint.transactionRepository().shutdown()
         } catch (e: Exception) {
             Logger.e(TAG, "关闭 Repository 失败", e)
         }
+
+        try {
+            // 清理 SafeRegexMatcher 的线程池
+            com.example.localexpense.util.SafeRegexMatcher.shutdown()
+        } catch (e: Exception) {
+            Logger.e(TAG, "关闭 SafeRegexMatcher 失败", e)
+        }
+
+        try {
+            // 释放 OCR 资源
+            com.example.localexpense.ocr.OcrParser.release(permanent = true)
+        } catch (e: Exception) {
+            Logger.e(TAG, "关闭 OCR 失败", e)
+        }
+
+        try {
+            // 通过 EntryPoint 获取 DuplicateChecker 并清理缓存
+            val entryPoint = EntryPoints.get(this, RepositoryEntryPoint::class.java)
+            entryPoint.duplicateChecker().clear()
+        } catch (e: Exception) {
+            Logger.e(TAG, "清理 DuplicateChecker 失败", e)
+        }
+
+        try {
+            // 清理 RuleEngine 缓存
+            com.example.localexpense.parser.RuleEngine.clearCache()
+        } catch (e: Exception) {
+            Logger.e(TAG, "清理 RuleEngine 失败", e)
+        }
+
+        Logger.i(TAG, "资源清理完成")
     }
 
     /**
@@ -154,8 +204,13 @@ class LocalExpenseApp : Application() {
         super.onLowMemory()
         Logger.w(TAG, "收到低内存警告，清理缓存")
 
-        // 清理去重检测器缓存
-        com.example.localexpense.util.DuplicateChecker.getInstance().clear()
+        // 通过 EntryPoint 获取 DuplicateChecker 并清理缓存
+        try {
+            val entryPoint = EntryPoints.get(this, RepositoryEntryPoint::class.java)
+            entryPoint.duplicateChecker().clear()
+        } catch (e: Exception) {
+            Logger.w(TAG, "清理 DuplicateChecker 失败: ${e.message}")
+        }
 
         // 释放 OCR 识别器资源（非永久释放，需要时会重建）
         try {
@@ -164,8 +219,8 @@ class LocalExpenseApp : Application() {
             Logger.w(TAG, "释放OCR资源失败: ${e.message}")
         }
 
-        // 触发 GC
-        System.gc()
+        // 注意：不手动调用 System.gc()，让系统自动管理内存
+        // 手动GC会导致主线程卡顿，影响用户体验
     }
 
     /**
@@ -174,24 +229,34 @@ class LocalExpenseApp : Application() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
 
+        // 获取 EntryPoint 用于访问 DuplicateChecker
+        val duplicateChecker = try {
+            val entryPoint = EntryPoints.get(this, RepositoryEntryPoint::class.java)
+            entryPoint.duplicateChecker()
+        } catch (e: Exception) {
+            Logger.w(TAG, "获取 DuplicateChecker 失败: ${e.message}")
+            null
+        }
+
+        @Suppress("DEPRECATION")
         when (level) {
             TRIM_MEMORY_RUNNING_CRITICAL,
             TRIM_MEMORY_COMPLETE -> {
                 Logger.w(TAG, "内存严重不足 (level=$level)")
-                com.example.localexpense.util.DuplicateChecker.getInstance().clear()
+                duplicateChecker?.clear()
                 // 严重内存不足时释放 OCR 资源
                 try {
                     com.example.localexpense.ocr.OcrParser.release(permanent = false)
                 } catch (e: Exception) {
                     Logger.w(TAG, "释放OCR资源失败: ${e.message}")
                 }
-                System.gc()
+                // 注意：不手动调用 System.gc()，让系统自动管理内存
             }
             TRIM_MEMORY_MODERATE,
             TRIM_MEMORY_RUNNING_LOW -> {
                 Logger.w(TAG, "内存不足 (level=$level)")
                 // 中等内存压力时清理部分缓存
-                com.example.localexpense.util.DuplicateChecker.getInstance().clear()
+                duplicateChecker?.clear()
             }
             TRIM_MEMORY_UI_HIDDEN -> {
                 // 应用进入后台，可以释放一些 UI 相关缓存

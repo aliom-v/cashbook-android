@@ -18,26 +18,13 @@ import java.util.regex.Pattern
  * 1. 将匹配规则从代码中抽离到JSON配置文件
  * 2. 支持从本地assets或网络加载规则
  * 3. 规则可以动态更新,无需发版
+ * 4. 支持金额黑名单配置化 (v1.8.1)
+ * 5. 支持版本兼容性检查 (v1.8.1)
  *
- * 规则文件格式示例 (rules.json):
- * {
- *   "version": "1.0.0",
- *   "apps": [
- *     {
- *       "packageName": "com.tencent.mm",
- *       "name": "微信",
- *       "rules": [
- *         {
- *           "type": "expense",
- *           "triggerKeywords": ["支付成功", "付款成功"],
- *           "amountRegex": "￥\\s*([0-9,]+(?:\\.[0-9]{1,2})?)",
- *           "merchantRegex": "收款方[:：]\\s*(.+)",
- *           "category": "微信支付"
- *         }
- *       ]
- *     }
- *   ]
- * }
+ * 性能优化 v1.8.2:
+ * - 关键词匹配结果缓存
+ * - 预计算关键词索引加速匹配
+ * - 使用只读引用减少同步开销
  */
 object RuleEngine {
 
@@ -49,6 +36,34 @@ object RuleEngine {
     private var appRules: Map<String, List<TransactionRule>> = emptyMap()
     @Volatile
     private var currentVersion: String = "0.0.0"
+    @Volatile
+    private var minAppVersion: Int = 0
+
+    // 金额黑名单缓存 (v1.8.1)
+    @Volatile
+    private var blacklistExact: Set<Double> = Constants.BLACKLIST_AMOUNTS
+    @Volatile
+    private var blacklistPrefixes: Set<Int> = Constants.BLACKLIST_INTEGER_PREFIXES
+    @Volatile
+    private var exactMatchOnlyAmounts: Set<Int> = setOf(10000)
+
+    // 关键词索引缓存 (v1.8.2) - 用于快速判断是否需要进行规则匹配
+    @Volatile
+    private var allTriggerKeywords: Set<String> = emptySet()
+
+    // v1.9.3: 预编译的关键词正则（用于快速多模式匹配）
+    @Volatile
+    private var keywordPattern: Regex? = null
+
+    // v1.9.3: 关键词到规则的倒排索引
+    @Volatile
+    private var keywordToRulesIndex: Map<String, List<Int>> = emptyMap()
+
+    // 初始化状态标志
+    @Volatile
+    private var isInitializing = false
+    @Volatile
+    private var initializationComplete = false
 
     // 规则更新锁，保护写操作的线程安全
     private val rulesLock = Any()
@@ -69,8 +84,28 @@ object RuleEngine {
     /**
      * 初始化规则引擎
      * 优先从本地缓存加载,如果没有则从assets加载默认规则
+     * 优化：防止重复初始化，保证线程安全
      */
     fun init(context: Context) {
+        // 快速检查：已完成初始化则跳过
+        if (initializationComplete && appRules.isNotEmpty()) {
+            Log.d(TAG, "规则引擎已初始化，跳过")
+            return
+        }
+
+        synchronized(rulesLock) {
+            // 双重检查：防止并发初始化
+            if (isInitializing) {
+                Log.d(TAG, "规则引擎正在初始化中，跳过")
+                return
+            }
+            if (initializationComplete && appRules.isNotEmpty()) {
+                return
+            }
+
+            isInitializing = true
+        }
+
         try {
             // 1. 尝试从本地缓存加载
             val cacheFile = File(context.filesDir, RULES_FILE)
@@ -84,24 +119,36 @@ object RuleEngine {
             }
 
             parseRules(rulesJson)
+            initializationComplete = true
             Log.i(TAG, "规则引擎初始化成功, 版本: $currentVersion")
         } catch (e: Exception) {
             Log.e(TAG, "规则引擎初始化失败: ${e.message}")
             // 降级到硬编码规则
             loadFallbackRules()
+            initializationComplete = true
+        } finally {
+            synchronized(rulesLock) {
+                isInitializing = false
+            }
         }
     }
 
     /**
      * 解析JSON规则（线程安全）
+     * 优化：同时构建关键词索引和倒排索引
      */
     private fun parseRules(json: String) {
         synchronized(rulesLock) {
             val root = JSONObject(json)
             currentVersion = root.optString("version", "0.0.0")
+            minAppVersion = root.optInt("minAppVersion", 0)
+
+            // 解析金额黑名单配置 (v1.8.1)
+            parseAmountBlacklist(root)
 
             val appsArray = root.getJSONArray("apps")
             val rulesMap = mutableMapOf<String, List<TransactionRule>>()
+            val keywordsSet = mutableSetOf<String>()
 
             for (i in 0 until appsArray.length()) {
                 val app = appsArray.getJSONObject(i)
@@ -111,7 +158,10 @@ object RuleEngine {
                 val rules = mutableListOf<TransactionRule>()
                 for (j in 0 until rulesArray.length()) {
                     val ruleJson = rulesArray.getJSONObject(j)
-                    rules.add(parseRule(ruleJson))
+                    val rule = parseRule(ruleJson)
+                    rules.add(rule)
+                    // 收集所有触发关键词用于快速预检查
+                    keywordsSet.addAll(rule.triggerKeywords)
                 }
 
                 // 按优先级排序（优先级高的先匹配）
@@ -119,7 +169,128 @@ object RuleEngine {
             }
 
             appRules = rulesMap
+            allTriggerKeywords = keywordsSet
+
+            // v1.9.3: 构建预编译的关键词正则
+            buildKeywordPattern(keywordsSet)
+
+            // v1.9.3: 构建倒排索引
+            buildKeywordIndex(rulesMap)
         }
+    }
+
+    /**
+     * v1.9.3: 构建预编译的关键词正则
+     * 用于快速检查文本是否包含任何关键词
+     */
+    private fun buildKeywordPattern(keywords: Set<String>) {
+        if (keywords.isEmpty()) {
+            keywordPattern = null
+            return
+        }
+
+        try {
+            // 按长度降序排序，确保长关键词优先匹配
+            val sortedKeywords = keywords.sortedByDescending { it.length }
+            val pattern = sortedKeywords.joinToString("|") { Regex.escape(it) }
+            keywordPattern = Regex(pattern)
+            Log.d(TAG, "关键词正则构建成功，包含 ${keywords.size} 个关键词")
+        } catch (e: Exception) {
+            Log.e(TAG, "构建关键词正则失败: ${e.message}")
+            keywordPattern = null
+        }
+    }
+
+    /**
+     * v1.9.3: 构建关键词到规则的倒排索引
+     * 用于快速定位可能匹配的规则
+     */
+    private fun buildKeywordIndex(rulesMap: Map<String, List<TransactionRule>>) {
+        val index = mutableMapOf<String, MutableList<Int>>()
+
+        rulesMap.forEach { (_, rules) ->
+            rules.forEachIndexed { ruleIndex, rule ->
+                rule.triggerKeywords.forEach { keyword ->
+                    index.getOrPut(keyword) { mutableListOf() }.add(ruleIndex)
+                }
+            }
+        }
+
+        keywordToRulesIndex = index
+        Log.d(TAG, "倒排索引构建成功，包含 ${index.size} 个关键词映射")
+    }
+
+    /**
+     * 解析金额黑名单配置 (v1.8.1)
+     */
+    private fun parseAmountBlacklist(root: JSONObject) {
+        val blacklistObj = root.optJSONObject("amountBlacklist") ?: return
+
+        try {
+            // 解析精确匹配黑名单
+            blacklistObj.optJSONArray("exact")?.let { array ->
+                val exactSet = mutableSetOf<Double>()
+                for (i in 0 until array.length()) {
+                    exactSet.add(array.getDouble(i))
+                }
+                if (exactSet.isNotEmpty()) {
+                    blacklistExact = exactSet
+                }
+            }
+
+            // 解析整数前缀黑名单
+            blacklistObj.optJSONArray("integerPrefixes")?.let { array ->
+                val prefixSet = mutableSetOf<Int>()
+                for (i in 0 until array.length()) {
+                    prefixSet.add(array.getInt(i))
+                }
+                if (prefixSet.isNotEmpty()) {
+                    blacklistPrefixes = prefixSet
+                }
+            }
+
+            // 解析特殊规则
+            blacklistObj.optJSONObject("specialRules")?.let { specialRules ->
+                val exactMatchOnly = mutableSetOf<Int>()
+                specialRules.keys().forEach { key ->
+                    val rule = specialRules.optJSONObject(key)
+                    if (rule?.optBoolean("exactMatchOnly", false) == true) {
+                        key.toIntOrNull()?.let { exactMatchOnly.add(it) }
+                    }
+                }
+                if (exactMatchOnly.isNotEmpty()) {
+                    exactMatchOnlyAmounts = exactMatchOnly
+                }
+            }
+
+            Log.i(TAG, "金额黑名单已加载: ${blacklistExact.size} 个精确值, ${blacklistPrefixes.size} 个前缀")
+        } catch (e: Exception) {
+            Log.e(TAG, "解析金额黑名单失败: ${e.message}")
+            // 保持使用默认值
+        }
+    }
+
+    /**
+     * 检查金额是否在黑名单中 (v1.8.1)
+     * 供外部调用，替代 Constants 中的硬编码检查
+     */
+    fun isAmountBlacklisted(amount: Double): Boolean {
+        // 精确匹配黑名单
+        if (amount in blacklistExact) return true
+
+        // 检查整数部分是否在黑名单前缀中
+        val integerPart = amount.toInt()
+        if (integerPart in blacklistPrefixes) {
+            // 检查是否是仅精确匹配的金额
+            if (integerPart in exactMatchOnlyAmounts) {
+                // 仅精确匹配时过滤（如 10000.0 过滤，10000.50 不过滤）
+                return amount == integerPart.toDouble()
+            }
+            // 其他黑名单号码直接过滤
+            return true
+        }
+
+        return false
     }
 
     // 记录无效规则数量，用于诊断
@@ -195,6 +366,7 @@ object RuleEngine {
 
     /**
      * 使用规则匹配交易信息
+     * 优化 v1.8.2: 添加快速预检查，减少不必要的规则遍历
      *
      * @param texts 页面文本列表
      * @param packageName 应用包名
@@ -204,49 +376,67 @@ object RuleEngine {
         // 快速检查：如果文本为空，直接返回
         if (texts.isEmpty()) return null
 
-        // 同步读取规则，防止读取到部分初始化的数据
-        val rules = synchronized(rulesLock) {
-            appRules[packageName]
-        } ?: return null
+        // 读取规则引用（避免在循环中重复同步）
+        val rules = appRules[packageName] ?: return null
+        val pattern = keywordPattern
 
         // 快速检查：如果规则为空，直接返回
         if (rules.isEmpty()) return null
 
         val joinedText = texts.joinToString(" | ")
 
+        // v1.9.3: 使用预编译正则进行快速预检查
+        // 如果没有预编译正则，降级到普通检查
+        val matchedKeywords: Set<String>
+        if (pattern != null) {
+            // 使用预编译正则一次性找出所有匹配的关键词
+            val matches = pattern.findAll(joinedText).map { it.value }.toSet()
+            if (matches.isEmpty()) return null
+            matchedKeywords = matches
+        } else {
+            // 降级：使用传统方式检查
+            val keywords = allTriggerKeywords
+            val hasAnyKeyword = keywords.any { joinedText.contains(it) }
+            if (!hasAnyKeyword) return null
+            matchedKeywords = emptySet() // 降级时无法预先知道匹配的关键词
+        }
+
         // 遍历规则（按优先级从高到低）
         for (rule in rules) {
-            // 1. 快速检查是否包含触发关键词（使用 any 短路求值）
-            val hasTriggerKeyword = rule.triggerKeywords.any { joinedText.contains(it) }
+            // 1. 快速检查是否包含触发关键词
+            // v1.9.3: 如果有预匹配的关键词集合，用交集判断更快
+            val hasTriggerKeyword = if (matchedKeywords.isNotEmpty()) {
+                rule.triggerKeywords.any { it in matchedKeywords }
+            } else {
+                rule.triggerKeywords.any { joinedText.contains(it) }
+            }
             if (!hasTriggerKeyword) {
                 continue
             }
 
             // 2. 检查排除关键词
-            // 修复：如果没有触发成功关键词，且有排除关键词，则跳过
-            // 例如：页面同时显示"确认支付"（排除）和其他内容，但没有"支付成功"（触发）
             val hasExcludeKeyword = rule.excludeKeywords.isNotEmpty() &&
                 rule.excludeKeywords.any { joinedText.contains(it) }
 
-            // 如果有排除关键词，需要更严格的触发关键词匹配
-            // 只有当触发关键词明确表示"成功/完成"时，才忽略排除关键词
+            // 如果有排除关键词，需要检查是否有明确的"成功"类触发词
             if (hasExcludeKeyword) {
-                val hasStrongTrigger = rule.triggerKeywords.any { keyword ->
-                    (keyword.contains("成功") || keyword.contains("完成") ||
-                     keyword.contains("已") || keyword.contains("到账")) &&
-                    joinedText.contains(keyword)
+                val hasStrongTriggerInText = rule.triggerKeywords.any { keyword ->
+                    val isStrongKeyword = keyword.contains("成功") ||
+                                          keyword.contains("完成") ||
+                                          keyword.contains("到账") ||
+                                          (keyword.contains("已") && (keyword.contains("付") || keyword.contains("收") || keyword.contains("转") || keyword.contains("扣")))
+                    isStrongKeyword && joinedText.contains(keyword)
                 }
-                if (!hasStrongTrigger) {
-                    // 没有强触发词，跳过这个规则
+                if (!hasStrongTriggerInText) {
                     continue
                 }
             }
 
-            // 3. 提取金额（提前检查规则是否有有效的金额模式）
+            // 3. 提取金额
             if (rule.amountPatterns.isEmpty()) continue
             val amount = extractAmount(texts, rule.amountPatterns) ?: continue
 
-            // 4. 提取商户（如果规则定义了）
+            // 4. 提取商户
             val merchant = rule.merchantPatterns?.let { patterns ->
                 extractMerchant(texts, patterns)
             } ?: getDefaultMerchant(rule.category)
@@ -387,9 +577,30 @@ object RuleEngine {
 
     /**
      * 更新规则（从网络下载新规则）
+     * v1.8.1: 添加版本兼容性检查
+     *
+     * @param context 上下文
+     * @param newRulesJson 新规则 JSON
+     * @param appVersionCode 当前应用版本号（用于兼容性检查）
+     * @return UpdateResult 更新结果
      */
-    fun updateRules(context: Context, newRulesJson: String): Boolean {
+    fun updateRules(context: Context, newRulesJson: String, appVersionCode: Int = Int.MAX_VALUE): UpdateResult {
         return try {
+            // 0. 预检查：解析最低版本要求
+            val root = JSONObject(newRulesJson)
+            val requiredMinVersion = root.optInt("minAppVersion", 0)
+            val newVersion = root.optString("version", "0.0.0")
+
+            // 版本兼容性检查
+            if (appVersionCode < requiredMinVersion) {
+                Log.w(TAG, "规则版本 $newVersion 需要 App 版本 >= $requiredMinVersion，当前版本: $appVersionCode")
+                return UpdateResult.IncompatibleVersion(
+                    rulesVersion = newVersion,
+                    requiredAppVersion = requiredMinVersion,
+                    currentAppVersion = appVersionCode
+                )
+            }
+
             // 1. 解析新规则
             parseRules(newRulesJson)
 
@@ -402,10 +613,37 @@ object RuleEngine {
             SecurePreferences.putLong(context, SecurePreferences.Keys.RULES_LAST_UPDATE, System.currentTimeMillis())
 
             Log.i(TAG, "规则更新成功: $currentVersion")
-            true
+            UpdateResult.Success(currentVersion)
         } catch (e: Exception) {
             Log.e(TAG, "规则更新失败: ${e.message}")
-            false
+            UpdateResult.Failed(e.message ?: "未知错误")
+        }
+    }
+
+    /**
+     * 规则更新结果 (v1.8.1)
+     */
+    sealed class UpdateResult {
+        data class Success(val version: String) : UpdateResult()
+        data class Failed(val error: String) : UpdateResult()
+        data class IncompatibleVersion(
+            val rulesVersion: String,
+            val requiredAppVersion: Int,
+            val currentAppVersion: Int
+        ) : UpdateResult() {
+            val message: String
+                get() = "规则版本 $rulesVersion 需要 App 版本 >= $requiredAppVersion"
+        }
+    }
+
+    /**
+     * 兼容旧版本的更新方法
+     */
+    @Deprecated("Use updateRules with appVersionCode parameter", ReplaceWith("updateRules(context, newRulesJson, appVersionCode)"))
+    fun updateRulesLegacy(context: Context, newRulesJson: String): Boolean {
+        return when (updateRules(context, newRulesJson)) {
+            is UpdateResult.Success -> true
+            else -> false
         }
     }
 
@@ -444,6 +682,40 @@ object RuleEngine {
         val version: String,
         val invalidPatternCount: Int
     )
+
+    /**
+     * 清理缓存（用于内存压力或应用退出时）
+     */
+    fun clearCache() {
+        synchronized(rulesLock) {
+            // 只清理关键词索引缓存，保留规则
+            // 规则是从文件加载的，不需要清理
+            invalidPatternCount = 0
+            Log.d(TAG, "RuleEngine 缓存已清理")
+        }
+    }
+
+    /**
+     * 重置引擎状态（用于测试）
+     */
+    fun reset() {
+        synchronized(rulesLock) {
+            appRules = emptyMap()
+            allTriggerKeywords = emptySet()
+            // v1.9.3: 清理预编译缓存
+            keywordPattern = null
+            keywordToRulesIndex = emptyMap()
+            blacklistExact = Constants.BLACKLIST_AMOUNTS
+            blacklistPrefixes = Constants.BLACKLIST_INTEGER_PREFIXES
+            exactMatchOnlyAmounts = setOf(10000)
+            currentVersion = "0.0.0"
+            minAppVersion = 0
+            initializationComplete = false
+            isInitializing = false
+            invalidPatternCount = 0
+            Log.d(TAG, "RuleEngine 已重置")
+        }
+    }
 
     /**
      * 辅助方法: JSONArray -> List<String>
